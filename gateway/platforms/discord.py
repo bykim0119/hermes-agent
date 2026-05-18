@@ -51,6 +51,11 @@ from gateway.config import Platform, PlatformConfig
 import re
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
+from gateway.coder_sessions import CoderSessionManager
+from gateway.coder_progress_formatter import (
+    DebouncedFlusher,
+    format_event as _format_coder_event,
+)
 from utils import atomic_json_write
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -553,6 +558,13 @@ class DiscordAdapter(BasePlatformAdapter):
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
         self._threads = ThreadParticipationTracker("discord")
+        # Coder sub-agent infrastructure (codex-exec via delegate_task_background)
+        _coder_idle = int(os.getenv("HERMES_CODER_IDLE_TIMEOUT_S", "7200"))
+        _coder_max = int(os.getenv("HERMES_CODER_MAX_CONCURRENT", "3"))
+        self._coder_sessions = CoderSessionManager(
+            idle_timeout_seconds=_coder_idle, max_concurrent=_coder_max
+        )
+        self._coder_flusher: Optional[DebouncedFlusher] = None  # set in on_ready
         # Persistent typing indicator loops per channel (DMs don't reliably
         # show the standard typing gateway event for bots)
         self._typing_tasks: Dict[str, asyncio.Task] = {}
@@ -686,6 +698,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 adapter_self._post_connect_task = asyncio.create_task(
                     adapter_self._run_post_connect_initialization()
                 )
+
+                # Start the coder progress debouncer (publishes to threads).
+                if adapter_self._coder_flusher is None:
+                    adapter_self._coder_flusher = DebouncedFlusher(
+                        interval_ms=int(os.getenv("HERMES_CODER_DEBOUNCE_MS", "250")),
+                        publish=adapter_self._publish_to_thread,
+                    )
+                    adapter_self._coder_flusher.start()
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -3651,6 +3671,33 @@ class DiscordAdapter(BasePlatformAdapter):
                         f"Direct error: {direct_error}. Fallback error: {fallback_error}"
                     )
                 }
+
+    # ------------------------------------------------------------------
+    # Coder sub-agent helpers (delegate_task_background)
+    # ------------------------------------------------------------------
+
+    def _make_thread_name(self, goal: str) -> str:
+        """Sanitize a coder goal into a Discord thread name (cap 60 chars)."""
+        name = " ".join((goal or "coder").split())
+        name = name.replace("`", "").replace("\n", " ").strip()
+        return name[:60] if len(name) > 60 else (name or "coder")
+
+    async def _publish_to_thread(self, thread_id: str, body: str) -> None:
+        """Publish a (possibly multi-line) message to a Discord thread by id."""
+        if not body or self._client is None:
+            return
+        try:
+            channel = self._client.get_channel(int(thread_id))
+            if channel is None:
+                channel = await self._client.fetch_channel(int(thread_id))
+            await channel.send(content=body[:1900])
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to publish to coder thread %s: %s",
+                self.name,
+                thread_id,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Auto-thread helpers
