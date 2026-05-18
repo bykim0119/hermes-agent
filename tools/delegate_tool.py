@@ -862,6 +862,11 @@ def _build_child_progress_callback(
     return _callback
 
 
+def _generate_subagent_id(task_index: int) -> str:
+    import uuid as _uuid
+    return f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -883,6 +888,9 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # External caller (e.g. delegate_task_background) may pin the id so
+    # gateway can route progress events to a pre-created Discord thread.
+    subagent_id_override: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -894,7 +902,6 @@ def _build_child_agent(
     model on OpenRouter while the parent runs on Nous Portal).
     """
     from run_agent import AIAgent
-    import uuid as _uuid
 
     # ── Role resolution ─────────────────────────────────────────────────
     # Honor the caller's role only when BOTH the kill switch and the
@@ -912,7 +919,7 @@ def _build_child_agent(
     # spawn_requested event, and the _active_subagents registry all share
     # one key.  parent_id is non-None when THIS parent is itself a subagent
     # (nested orchestrator -> worker chain).
-    subagent_id = f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
+    subagent_id = subagent_id_override or _generate_subagent_id(task_index)
     parent_subagent_id = getattr(parent_agent, "_subagent_id", None)
     tui_depth = max(0, child_depth - 1)  # 0 = first-level child for the UI
 
@@ -1877,6 +1884,8 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     parent_agent=None,
+    override_provider: Optional[str] = None,
+    subagent_id_override: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -2009,7 +2018,7 @@ def delegate_task(
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
+                override_provider=override_provider or creds["provider"],
                 override_base_url=creds["base_url"],
                 override_api_key=creds["api_key"],
                 override_api_mode=creds["api_mode"],
@@ -2022,6 +2031,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                subagent_id_override=subagent_id_override,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2249,6 +2259,113 @@ def delegate_task(
         },
         ensure_ascii=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Background variant — spawns coder child detached, returns immediately
+# ---------------------------------------------------------------------------
+
+_CODER_RUN_REGISTRY: Dict[str, Dict[str, Any]] = {}
+_CODER_RUN_LOCK = threading.Lock()
+
+
+def _register_coder_run(coder_run_id: str, parent_task_id: str, goal: str) -> None:
+    with _CODER_RUN_LOCK:
+        _CODER_RUN_REGISTRY[coder_run_id] = {
+            "parent_task_id": parent_task_id,
+            "goal": goal,
+            "started_at": time.time(),
+            "status": "running",
+        }
+
+
+def get_coder_run(coder_run_id: str) -> Optional[Dict[str, Any]]:
+    with _CODER_RUN_LOCK:
+        rec = _CODER_RUN_REGISTRY.get(coder_run_id)
+        return dict(rec) if rec else None
+
+
+def _spawn_detached_coder(
+    parent_agent,
+    goal: str,
+    context: str,
+    coder_run_id: str,
+    provider: str = "codex-exec",
+) -> str:
+    """Run the coder child in a background daemon thread.
+
+    Returns immediately with the coder_run_id. The child runs delegate_task
+    with subagent_id_override=coder_run_id so gateway can route its progress
+    events to the matching Discord thread.
+    """
+    def _runner() -> None:
+        try:
+            result = delegate_task(
+                parent_agent=parent_agent,
+                goal=goal,
+                context=context,
+                tasks=None,
+                toolsets=["terminal", "file"],
+                role="leaf",
+                override_provider=provider,
+                subagent_id_override=coder_run_id,
+            )
+            with _CODER_RUN_LOCK:
+                rec = _CODER_RUN_REGISTRY.get(coder_run_id)
+                if rec is not None:
+                    rec["status"] = "completed"
+                    rec["result"] = result
+        except Exception as exc:
+            logger.exception("Coder run %s failed: %s", coder_run_id, exc)
+            with _CODER_RUN_LOCK:
+                rec = _CODER_RUN_REGISTRY.get(coder_run_id)
+                if rec is not None:
+                    rec["status"] = "failed"
+                    rec["error"] = str(exc)
+
+    thread = threading.Thread(
+        target=_runner, name=f"coder-{coder_run_id}", daemon=True
+    )
+    thread.start()
+    return coder_run_id
+
+
+def delegate_task_background(
+    parent_agent=None,
+    goal: Optional[str] = None,
+    context: str = "",
+    provider: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Async variant of delegate_task: spawns the coder detached and returns immediately.
+
+    Returns:
+        {"coder_run_id": str, "status": "spawned", "goal": str}
+
+    The gateway is expected to create a Discord thread keyed by coder_run_id
+    and route subagent_progress events into that thread.
+    """
+    import uuid as _uuid
+
+    if parent_agent is None:
+        return {"error": "delegate_task_background requires a parent agent context."}
+    if not goal:
+        return {"error": "delegate_task_background requires a non-empty goal."}
+
+    coder_run_id = f"coder-{_uuid.uuid4().hex[:8]}"
+    parent_task_id = (
+        getattr(parent_agent, "task_id", None)
+        or getattr(parent_agent, "_subagent_id", None)
+        or "unknown"
+    )
+    _register_coder_run(coder_run_id, parent_task_id, goal)
+    _spawn_detached_coder(
+        parent_agent=parent_agent,
+        goal=goal,
+        context=context,
+        coder_run_id=coder_run_id,
+        provider=provider or "codex-exec",
+    )
+    return {"coder_run_id": coder_run_id, "status": "spawned", "goal": goal}
 
 
 def _resolve_child_credential_pool(effective_provider: Optional[str], parent_agent):
@@ -2594,4 +2711,44 @@ registry.register(
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
+)
+
+
+DELEGATE_TASK_BACKGROUND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "goal": {
+            "type": "string",
+            "description": (
+                "What the coder should accomplish (specific, self-contained). "
+                "The Codex CLI subagent will handle planning, file edits, and "
+                "command execution on its own."
+            ),
+        },
+        "context": {
+            "type": "string",
+            "description": (
+                "Additional context: file paths, error messages, constraints, "
+                "links to related issues."
+            ),
+        },
+    },
+    "required": ["goal"],
+}
+
+
+registry.register(
+    name="delegate_task_background",
+    toolset="delegation",
+    schema=DELEGATE_TASK_BACKGROUND_SCHEMA,
+    handler=lambda args, **kw: json.dumps(
+        delegate_task_background(
+            parent_agent=kw.get("parent_agent"),
+            goal=args.get("goal"),
+            context=args.get("context") or "",
+        ),
+        ensure_ascii=False,
+    ),
+    check_fn=check_delegate_requirements,
+    emoji="🧑‍💻",
 )
