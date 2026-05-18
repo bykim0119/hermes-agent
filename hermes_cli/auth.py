@@ -83,6 +83,7 @@ MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 DEFAULT_QWEN_BASE_URL = "https://portal.qwen.ai/v1"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CODEX_EXEC_BASE_URL = "codex-exec://local"
 DEFAULT_OLLAMA_CLOUD_BASE_URL = "https://ollama.com/v1"
 STEPFUN_STEP_PLAN_INTL_BASE_URL = "https://api.stepfun.ai/step_plan/v1"
 STEPFUN_STEP_PLAN_CN_BASE_URL = "https://api.stepfun.com/step_plan/v1"
@@ -196,6 +197,13 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "codex-exec": ProviderConfig(
+        id="codex-exec",
+        name="OpenAI Codex CLI",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CODEX_EXEC_BASE_URL,
+        base_url_env_var="CODEX_EXEC_BASE_URL",
     ),
     "gemini": ProviderConfig(
         id="gemini",
@@ -4107,6 +4115,39 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     }
 
 
+_EXTERNAL_PROCESS_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "copilot-acp": {
+        "command_env_vars": ("HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH"),
+        "default_command": "copilot",
+        "args_env_var": "HERMES_COPILOT_ACP_ARGS",
+        "default_args": ["--acp", "--stdio"],
+        "missing_cli_hint": (
+            "Install GitHub Copilot CLI or set "
+            "HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+        ),
+        "missing_cli_code": "missing_copilot_cli",
+        "remote_base_url_prefix": "acp+tcp://",
+    },
+    "codex-exec": {
+        "command_env_vars": ("HERMES_CODER_COMMAND",),
+        "default_command": "codex",
+        "args_env_var": "HERMES_CODER_ARGS",
+        "default_args": [
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "workspace-write",
+        ],
+        "missing_cli_hint": (
+            "Install OpenAI Codex CLI or set HERMES_CODER_COMMAND."
+        ),
+        "missing_cli_code": "missing_codex_cli",
+        "remote_base_url_prefix": None,
+    },
+}
+
+
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve runtime details for local subprocess-backed providers."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
@@ -4117,29 +4158,46 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
             code="invalid_provider",
         )
 
-    base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
+    spec = _EXTERNAL_PROCESS_DEFAULTS.get(provider_id)
+    if spec is None:
+        raise AuthError(
+            f"No external-process credential spec for provider '{provider_id}'.",
+            provider=provider_id,
+            code="invalid_provider",
+        )
+
+    base_url = (
+        os.getenv(pconfig.base_url_env_var, "").strip()
+        if pconfig.base_url_env_var
+        else ""
+    )
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    command = ""
+    for env_var in spec["command_env_vars"]:
+        command = os.getenv(env_var, "").strip()
+        if command:
+            break
+    if not command:
+        command = spec["default_command"]
+
+    raw_args = os.getenv(spec["args_env_var"], "").strip()
+    args = shlex.split(raw_args) if raw_args else list(spec["default_args"])
+
     resolved_command = shutil.which(command) if command else None
-    if not resolved_command and not base_url.startswith("acp+tcp://"):
+    remote_prefix = spec.get("remote_base_url_prefix")
+    is_remote = bool(remote_prefix and base_url.startswith(remote_prefix))
+    if not resolved_command and not is_remote:
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            f"Could not find the CLI command '{command}'. {spec['missing_cli_hint']}",
             provider=provider_id,
-            code="missing_copilot_cli",
+            code=spec["missing_cli_code"],
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": provider_id,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

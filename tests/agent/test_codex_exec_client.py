@@ -130,3 +130,36 @@ def test_facade_populates_usage_from_turn_completed():
     assert resp.usage.completion_tokens == 42
     assert resp.usage.total_tokens == 142
     assert resp.usage.prompt_tokens_details.cached_tokens == 8
+
+
+# ---------------------------------------------------------------------------
+# auxiliary_client.resolve_provider_client wiring for codex-exec
+# ---------------------------------------------------------------------------
+
+
+def test_auxiliary_client_resolves_codex_exec_to_facade(monkeypatch):
+    """resolve_provider_client(provider='codex-exec') returns CodexExecFacade."""
+    from agent import auxiliary_client
+
+    fake_creds = {
+        "provider": "codex-exec",
+        "api_key": "codex-exec",
+        "base_url": "codex-exec://local",
+        "command": "/usr/local/bin/codex",
+        "args": ["exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write"],
+        "source": "process",
+    }
+    import hermes_cli.auth
+
+    monkeypatch.setattr(
+        hermes_cli.auth,
+        "resolve_external_process_provider_credentials",
+        lambda provider: fake_creds,
+    )
+
+    client, model = auxiliary_client.resolve_provider_client(
+        "codex-exec", model="gpt-5.4", async_mode=False
+    )
+
+    assert isinstance(client, CodexExecFacade)
+    assert model == "gpt-5.4"

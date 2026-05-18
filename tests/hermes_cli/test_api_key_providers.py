@@ -491,6 +491,50 @@ class TestResolveApiKeyProviderCredentials:
         assert creds["args"] == ["--acp", "--stdio"]
         assert creds["source"] == "process"
 
+    def test_resolve_codex_exec_with_local_cli(self, monkeypatch):
+        monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
+        monkeypatch.setenv(
+            "HERMES_CODER_ARGS",
+            "exec --json --skip-git-repo-check --sandbox workspace-write",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.auth.shutil.which",
+            lambda command: f"/usr/local/bin/{command}",
+        )
+
+        creds = resolve_external_process_provider_credentials("codex-exec")
+
+        assert creds["provider"] == "codex-exec"
+        assert creds["api_key"] == "codex-exec"
+        assert creds["base_url"] == "codex-exec://local"
+        assert creds["command"] == "/usr/local/bin/codex"
+        assert creds["args"] == [
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "workspace-write",
+        ]
+        assert creds["source"] == "process"
+
+    def test_resolve_codex_exec_default_args_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
+        monkeypatch.delenv("HERMES_CODER_ARGS", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.auth.shutil.which",
+            lambda command: f"/usr/local/bin/{command}",
+        )
+
+        creds = resolve_external_process_provider_credentials("codex-exec")
+
+        # Default args must include --skip-git-repo-check (spike constraint #1)
+        # and --sandbox workspace-write (spike constraint #2).
+        assert "exec" in creds["args"]
+        assert "--json" in creds["args"]
+        assert "--skip-git-repo-check" in creds["args"]
+        assert "--sandbox" in creds["args"]
+        assert "workspace-write" in creds["args"]
+
     def test_resolve_kimi_with_key(self, monkeypatch):
         monkeypatch.setenv("KIMI_API_KEY", "kimi-secret-key")
         creds = resolve_api_key_provider_credentials("kimi-coding")
