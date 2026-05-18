@@ -84,6 +84,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="acp://copilot",
         base_url_env_var="COPILOT_ACP_BASE_URL",
     ),
+    "codex-exec": HermesOverlay(
+        transport="codex_responses",
+        auth_type="external_process",
+        base_url_override="codex-exec://local",
+        base_url_env_var="CODEX_EXEC_BASE_URL",
+    ),
     "github-copilot": HermesOverlay(
         transport="openai_chat",
         extra_env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN"),

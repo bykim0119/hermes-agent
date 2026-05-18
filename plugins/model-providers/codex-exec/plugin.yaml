@@ -1,0 +1,5 @@
+name: codex-exec-provider
+kind: model-provider
+version: 1.0.0
+description: OpenAI Codex CLI via `codex exec --json` subprocess
+author: bykim0119
