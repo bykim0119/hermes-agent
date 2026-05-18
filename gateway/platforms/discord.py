@@ -711,6 +711,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 if message.type not in (discord.MessageType.default, discord.MessageType.reply):
                     return
 
+                # DM gate: DISCORD_ALLOW_DMS=false blocks all direct messages
+                # (mirrors OpenClaw dmPolicy=disabled). Default true preserves
+                # existing behavior — DMs are processed by the same allowlist
+                # as channel messages unless this gate trips.
+                if isinstance(message.channel, discord.DMChannel):
+                    if os.getenv("DISCORD_ALLOW_DMS", "true").lower() in ("false", "0", "no", "off"):
+                        return
+
                 # Bot message filtering (DISCORD_ALLOW_BOTS):
                 #   "none"     — ignore all other bots (default)
                 #   "mentions" — accept bot messages only when they @mention us
