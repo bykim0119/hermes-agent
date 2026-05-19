@@ -13451,14 +13451,12 @@ class GatewayRunner:
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
-            if not progress_queue or not _run_still_current():
-                return
-
-            # Coder subagent progress: NDJSON events from the codex-exec child
-            # arrive tagged with a subagent_id (the coder_run_id bound to a
-            # Discord thread). Route to the platform adapter's on_coder_event
-            # hook so the thread fills with live progress. Other adapters
-            # silently no-op (no hook = no-op).
+            # Coder subagent progress lives outside the parent turn lifecycle:
+            # delegate_task_background spawns a daemon thread that emits codex
+            # events long after the spawning turn ends, so the route below has
+            # to bypass progress_queue / _run_still_current gates (they belong
+            # to the parent's UI bubbles, not the bound coder thread). We only
+            # need the platform-adapter's event-loop + hook to still exist.
             if event_type == "subagent_progress":
                 _subagent_id = kwargs.get("subagent_id")
                 _event_payload = kwargs.get("event")
@@ -13478,6 +13476,9 @@ class GatewayRunner:
                         )
                     except Exception as _e:
                         logger.debug("on_coder_event dispatch failed: %s", _e)
+                return
+
+            if not progress_queue or not _run_still_current():
                 return
 
             # First-touch onboarding: the first time a tool takes longer than
