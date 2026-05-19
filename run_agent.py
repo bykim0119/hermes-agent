@@ -1264,8 +1264,10 @@ class AIAgent:
             api_mode is None
             and self.api_mode == "chat_completions"
             and self.provider != "copilot-acp"
+            and self.provider != "codex-exec"
             and not str(self.base_url or "").lower().startswith("acp://copilot")
             and not str(self.base_url or "").lower().startswith("acp+tcp://")
+            and not str(self.base_url or "").lower().startswith("codex-exec://")
             and not self._is_azure_openai_url()
             and (
                 self._is_direct_openai_url()
