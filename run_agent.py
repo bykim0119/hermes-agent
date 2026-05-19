@@ -9838,6 +9838,20 @@ class AIAgent:
             parent_agent=self,
         )
 
+    def _dispatch_delegate_task_background(self, function_args: dict) -> str:
+        """Single call site for delegate_task_background dispatch.
+
+        Mirrors _dispatch_delegate_task — the registry handler can't supply
+        parent_agent, so the agent loop intercepts and injects ``self`` here.
+        """
+        from tools.delegate_tool import delegate_task_background as _delegate_task_background
+        result = _delegate_task_background(
+            parent_agent=self,
+            goal=function_args.get("goal"),
+            context=function_args.get("context") or "",
+        )
+        return json.dumps(result, ensure_ascii=False)
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
                      pre_tool_block_checked: bool = False) -> str:
@@ -9914,6 +9928,8 @@ class AIAgent:
             )
         elif function_name == "delegate_task":
             return self._dispatch_delegate_task(function_args)
+        elif function_name == "delegate_task_background":
+            return self._dispatch_delegate_task_background(function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -10567,6 +10583,16 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
+            elif function_name == "delegate_task_background":
+                # Returns immediately after spawning the detached coder, so no
+                # spinner — just dispatch and emit a one-line cute message.
+                function_result = self._dispatch_delegate_task_background(function_args)
+                tool_duration = time.time() - tool_start_time
+                if self._should_emit_quiet_tool_messages():
+                    cute_msg = _get_cute_tool_message_impl(
+                        'delegate_task_background', function_args, tool_duration, result=function_result
+                    )
+                    self._vprint(f"  {cute_msg}")
             elif self._context_engine_tool_names and function_name in self._context_engine_tool_names:
                 # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
                 spinner = None
