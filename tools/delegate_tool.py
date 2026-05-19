@@ -1048,6 +1048,13 @@ def _build_child_agent(
         effective_provider = "copilot-acp"
         effective_api_mode = "chat_completions"
 
+    # codex-exec is process-backed and only implements chat.completions.create
+    # — never inherit the parent's codex_responses api_mode here, otherwise the
+    # child agent calls client.responses.* on the facade and crashes with
+    # ``'CodexExecFacade' object has no attribute 'responses'``.
+    if (effective_provider or "").strip().lower() == "codex-exec":
+        effective_api_mode = "chat_completions"
+
     # Resolve reasoning config: delegation override > parent inherit
     parent_reasoning = getattr(parent_agent, "reasoning_config", None)
     child_reasoning = parent_reasoning
