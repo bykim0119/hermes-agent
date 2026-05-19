@@ -2285,6 +2285,34 @@ def get_coder_run(coder_run_id: str) -> Optional[Dict[str, Any]]:
         return dict(rec) if rec else None
 
 
+def _build_coder_progress_sink(parent_agent, coder_run_id: str):
+    """Sink installed into CodexExecFacade so each NDJSON event is relayed
+    upward as a ``subagent_progress`` event tagged with the coder_run_id.
+
+    The parent agent's ``tool_progress_callback`` is the gateway-installed
+    progress sink (gateway/run.py); from there a ``subagent_progress`` branch
+    dispatches to the platform adapter's ``on_coder_event`` hook.
+    """
+    def _sink(event) -> None:
+        parent_cb = getattr(parent_agent, "tool_progress_callback", None)
+        if parent_cb is None:
+            return
+        try:
+            payload = {"event": event.event, "data": event.data}
+            parent_cb(
+                "subagent_progress",
+                None,
+                None,
+                None,
+                subagent_id=coder_run_id,
+                event=payload,
+            )
+        except Exception:
+            logger.debug("coder progress sink relay failed", exc_info=True)
+
+    return _sink
+
+
 def _spawn_detached_coder(
     parent_agent,
     goal: str,
@@ -2298,7 +2326,14 @@ def _spawn_detached_coder(
     with subagent_id_override=coder_run_id so gateway can route its progress
     events to the matching Discord thread.
     """
+    sink = _build_coder_progress_sink(parent_agent, coder_run_id)
+
     def _runner() -> None:
+        # Imported lazily — codex_exec_client lives outside this package and
+        # the import would create a cycle if pulled in at module top.
+        from agent.codex_exec_client import _FACADE_PROGRESS_SINK
+
+        token = _FACADE_PROGRESS_SINK.set(sink)
         try:
             result = delegate_task(
                 parent_agent=parent_agent,
@@ -2322,6 +2357,8 @@ def _spawn_detached_coder(
                 if rec is not None:
                     rec["status"] = "failed"
                     rec["error"] = str(exc)
+        finally:
+            _FACADE_PROGRESS_SINK.reset(token)
 
     thread = threading.Thread(
         target=_runner, name=f"coder-{coder_run_id}", daemon=True

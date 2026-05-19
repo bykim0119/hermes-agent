@@ -3760,6 +3760,32 @@ class DiscordAdapter(BasePlatformAdapter):
                 self.name, coder_run_id, exc,
             )
 
+    async def on_coder_event(self, subagent_id: str, event: dict) -> None:
+        """Route a coder NDJSON event to the bound Discord thread.
+
+        Called from gateway/run.py's progress_callback (subagent_progress
+        branch). Lookup is cheap and tolerant — unknown coder_run_ids drop
+        silently because a thread bind may not yet have committed when the
+        first events stream in (or the coder finished before the bind), and
+        either case is recoverable on the next event.
+        """
+        if not subagent_id or not event:
+            return
+        thread_id = self._coder_sessions.get_thread(subagent_id)
+        if not thread_id:
+            return
+        text = _format_coder_event(event)
+        if not text:
+            return
+        if self._coder_flusher is None:
+            await self._publish_to_thread(thread_id, text)
+            return
+        await self._coder_flusher.add(thread_id, text)
+        try:
+            self._coder_sessions.touch(subagent_id)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Auto-thread helpers
     # ------------------------------------------------------------------

@@ -11,10 +11,61 @@ MAX_CHUNK_CHARS = 3500
 def format_event(event: dict) -> Optional[str]:
     """Convert a subagent_progress event dict into a thread message string.
 
+    Accepts both the hermes-internal shape (``{"event": "tool_call", ...}``)
+    and the Codex CLI NDJSON shape (``{"event": "item.completed",
+    "data": {...}}``) so the formatter is the single normalisation point.
+
     Returns None for events that should not be rendered.
     Caller is responsible for debounce / batching.
     """
     et = event.get("event")
+    # Codex CLI events ------------------------------------------------------
+    # Dotted event names (e.g. "item.completed") are the obvious marker;
+    # "error" and "raw" are flat but still Codex when shaped with a ``data``
+    # dict — distinguish from the hermes-flat shape that uses top-level keys.
+    _is_codex = bool(et) and (
+        "." in et or (et in ("error", "raw") and isinstance(event.get("data"), dict))
+    )
+    if _is_codex:
+        data = event.get("data") or {}
+        if et == "thread.started" or et == "turn.started":
+            return None
+        if et == "item.completed":
+            item = data.get("item") or {}
+            itype = item.get("type") or ""
+            text = item.get("text") or ""
+            if itype == "agent_message":
+                return _cap(text) if text else None
+            if itype in ("reasoning",):
+                return f"💭 {_cap(text)}" if text else None
+            if itype in ("local_shell_call", "function_call"):
+                cmd = (
+                    item.get("command")
+                    or item.get("name")
+                    or _cap(text)
+                    or itype
+                )
+                return f"▶️ {cmd}"
+            if itype in ("file_change",):
+                path = item.get("path") or "?"
+                return f"✏️ {path}"
+            label = itype or "item"
+            return f"📦 {label}" if not text else f"📦 {label}: {_cap(text)}"
+        if et == "turn.completed":
+            usage = data.get("usage") or {}
+            out = usage.get("output_tokens")
+            if out is not None:
+                return f"✅ 완료 ({out} out tokens)"
+            return "✅ 완료"
+        if et == "error":
+            stderr = data.get("stderr") or data.get("message") or ""
+            rc = data.get("returncode")
+            head = f"❌ codex exit {rc}" if rc is not None else "❌ codex error"
+            return f"{head}\n{_cap(stderr)}" if stderr else head
+        if et == "raw":
+            return _cap(data.get("text", ""))
+        return None
+    # Hermes-internal events -----------------------------------------------
     if et == "tool_call":
         tool = event.get("tool", "")
         if tool == "read_file":

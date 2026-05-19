@@ -51,3 +51,48 @@ def test_long_chunks_are_capped():
 def test_unknown_event_returns_none():
     """Events we don't render skip silently (do not garbage-spam the thread)."""
     assert format_event({"event": "internal_metric", "value": 42}) is None
+
+
+# ---------------------------------------------------------------------------
+# Codex CLI NDJSON shape — direct passthrough from CodexExecClient
+# ---------------------------------------------------------------------------
+
+
+def test_codex_thread_started_drops_silently():
+    assert format_event({"event": "thread.started", "data": {"thread_id": "t1"}}) is None
+
+
+def test_codex_turn_started_drops_silently():
+    assert format_event({"event": "turn.started", "data": {}}) is None
+
+
+def test_codex_agent_message_renders_text():
+    out = format_event({
+        "event": "item.completed",
+        "data": {"item": {"type": "agent_message", "text": "patched config"}},
+    })
+    assert out == "patched config"
+
+
+def test_codex_local_shell_call_renders_command():
+    out = format_event({
+        "event": "item.completed",
+        "data": {"item": {"type": "local_shell_call", "command": "pytest"}},
+    })
+    assert out == "▶️ pytest"
+
+
+def test_codex_turn_completed_with_usage():
+    out = format_event({
+        "event": "turn.completed",
+        "data": {"usage": {"input_tokens": 100, "output_tokens": 42}},
+    })
+    assert out == "✅ 완료 (42 out tokens)"
+
+
+def test_codex_error_includes_stderr():
+    out = format_event({
+        "event": "error",
+        "data": {"returncode": 1, "stderr": "boom"},
+    })
+    assert "❌" in out and "boom" in out

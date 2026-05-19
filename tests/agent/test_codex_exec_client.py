@@ -137,6 +137,54 @@ def test_facade_populates_usage_from_turn_completed():
 # ---------------------------------------------------------------------------
 
 
+def test_facade_inherits_progress_sink_from_contextvar():
+    """If no explicit progress_callback is passed, the facade picks up the
+    sink installed in the module-level ContextVar — this is how
+    _spawn_detached_coder bridges Codex events back into the parent agent."""
+    from agent.codex_exec_client import _FACADE_PROGRESS_SINK
+
+    events = [
+        CodexEvent("thread.started", {"thread_id": "t"}),
+        CodexEvent("item.completed", {"item": {"type": "agent_message", "text": "hi"}}),
+        CodexEvent("turn.completed", {"usage": {"input_tokens": 1, "output_tokens": 1, "cached_input_tokens": 0}}),
+    ]
+    captured: list = []
+    sink = lambda ev: captured.append((ev.event, ev.data))
+
+    token = _FACADE_PROGRESS_SINK.set(sink)
+    try:
+        facade = CodexExecFacade(workspace="/tmp", _client=_FakeClient(list(events)))
+        facade.chat.completions.create(messages=[{"role": "user", "content": "go"}])
+    finally:
+        _FACADE_PROGRESS_SINK.reset(token)
+
+    assert [e for e, _ in captured] == ["thread.started", "item.completed", "turn.completed"]
+
+
+def test_facade_explicit_callback_overrides_contextvar():
+    """Explicit progress_callback constructor arg wins over the ContextVar."""
+    from agent.codex_exec_client import _FACADE_PROGRESS_SINK
+
+    sentinel_sink = lambda ev: None
+    explicit = []
+
+    token = _FACADE_PROGRESS_SINK.set(sentinel_sink)
+    try:
+        facade = CodexExecFacade(
+            workspace="/tmp",
+            progress_callback=lambda ev: explicit.append(ev.event),
+            _client=_FakeClient([
+                CodexEvent("item.completed", {"item": {"type": "agent_message", "text": "ok"}}),
+                CodexEvent("turn.completed", {"usage": {}}),
+            ]),
+        )
+    finally:
+        _FACADE_PROGRESS_SINK.reset(token)
+
+    facade.chat.completions.create(messages=[{"role": "user", "content": "x"}])
+    assert "item.completed" in explicit
+
+
 def test_auxiliary_client_resolves_codex_exec_to_facade(monkeypatch):
     """resolve_provider_client(provider='codex-exec') returns CodexExecFacade."""
     from agent import auxiliary_client

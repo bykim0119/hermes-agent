@@ -7,6 +7,7 @@ hermes coder subagent when delegating coding tasks to Codex CLI.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -17,6 +18,14 @@ from typing import Any, AsyncIterator, Callable, Optional
 logger = logging.getLogger(__name__)
 
 FACADE_MARKER_BASE_URL = "codex-exec://local"
+
+# Cross-call bridge: when a coder subagent is being spawned, the orchestrator
+# installs a sink here so any CodexExecFacade created during that turn forwards
+# its NDJSON events back up to the parent's progress callback. Read by the
+# facade in __init__; set/reset in tools.delegate_tool._spawn_detached_coder.
+_FACADE_PROGRESS_SINK: contextvars.ContextVar[
+    Optional[Callable[["CodexEvent"], None]]
+] = contextvars.ContextVar("codex_exec_progress_sink", default=None)
 
 
 @dataclass
@@ -134,7 +143,9 @@ class CodexExecFacade:
         self.api_key = api_key or "codex-exec"
         self.base_url = base_url or FACADE_MARKER_BASE_URL
         self._workspace = str(workspace or os.getcwd())
-        self._progress_callback = progress_callback
+        # Explicit constructor arg wins; otherwise inherit the sink the
+        # orchestrator may have published via ContextVar before spawning us.
+        self._progress_callback = progress_callback or _FACADE_PROGRESS_SINK.get()
         self._client = _client or CodexExecClient(
             command=command or "codex",
             extra_args=list(args or []),

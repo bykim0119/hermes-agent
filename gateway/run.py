@@ -13454,6 +13454,32 @@ class GatewayRunner:
             if not progress_queue or not _run_still_current():
                 return
 
+            # Coder subagent progress: NDJSON events from the codex-exec child
+            # arrive tagged with a subagent_id (the coder_run_id bound to a
+            # Discord thread). Route to the platform adapter's on_coder_event
+            # hook so the thread fills with live progress. Other adapters
+            # silently no-op (no hook = no-op).
+            if event_type == "subagent_progress":
+                _subagent_id = kwargs.get("subagent_id")
+                _event_payload = kwargs.get("event")
+                if (
+                    _subagent_id
+                    and _event_payload
+                    and _status_adapter is not None
+                    and hasattr(_status_adapter, "on_coder_event")
+                ):
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            _status_adapter.on_coder_event(
+                                subagent_id=_subagent_id,
+                                event=_event_payload,
+                            ),
+                            _loop_for_step,
+                        )
+                    except Exception as _e:
+                        logger.debug("on_coder_event dispatch failed: %s", _e)
+                return
+
             # First-touch onboarding: the first time a tool takes longer than
             # _LONG_TOOL_THRESHOLD_S during a run that's streaming every tool
             # (progress_mode == "all"), append a one-time hint suggesting
