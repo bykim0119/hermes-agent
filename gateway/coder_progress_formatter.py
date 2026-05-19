@@ -30,6 +30,11 @@ def format_event(event: dict) -> Optional[str]:
         data = event.get("data") or {}
         if et == "thread.started" or et == "turn.started":
             return None
+        if et == "item.started":
+            # Skip start markers — item.completed lands shortly with the full
+            # outcome (exit code, output) and rendering both clutters the
+            # thread with duplicates of every command.
+            return None
         if et == "item.completed":
             item = data.get("item") or {}
             itype = item.get("type") or ""
@@ -38,14 +43,16 @@ def format_event(event: dict) -> Optional[str]:
                 return _cap(text) if text else None
             if itype in ("reasoning",):
                 return f"💭 {_cap(text)}" if text else None
-            if itype in ("local_shell_call", "function_call"):
-                cmd = (
-                    item.get("command")
-                    or item.get("name")
-                    or _cap(text)
-                    or itype
-                )
-                return f"▶️ {cmd}"
+            if itype in ("command_execution", "local_shell_call", "function_call"):
+                cmd = item.get("command") or item.get("name") or text or itype
+                # Codex wraps almost everything in ``/bin/bash -lc "..."`` —
+                # strip the wrapper so the visible line is the actual command
+                # the model asked for, not the shell invocation harness.
+                cmd = _strip_bash_wrapper(cmd)
+                exit_code = item.get("exit_code")
+                if isinstance(exit_code, int) and exit_code != 0:
+                    return f"▶️ {_cap(cmd)}  ⚠️ exit {exit_code}"
+                return f"▶️ {_cap(cmd)}"
             if itype in ("file_change",):
                 path = item.get("path") or "?"
                 return f"✏️ {path}"
@@ -101,6 +108,22 @@ def _cap(text: str) -> str:
     if len(text) <= MAX_CHUNK_CHARS:
         return text
     return text[:MAX_CHUNK_CHARS] + "…[truncated]"
+
+
+def _strip_bash_wrapper(cmd: str) -> str:
+    """Codex usually wraps shell invocations as ``/bin/bash -lc "<actual>"``;
+    surface the actual command so the rendered line matches user intent."""
+    if not cmd:
+        return cmd
+    s = cmd.strip()
+    for prefix in ("/bin/bash -lc ", "bash -lc ", "/bin/sh -c ", "sh -c "):
+        if s.startswith(prefix):
+            inner = s[len(prefix):].strip()
+            # Strip surrounding quotes (single or double) — keep inner as-is.
+            if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in ("'", '"'):
+                inner = inner[1:-1]
+            return inner
+    return cmd
 
 
 class DebouncedFlusher:

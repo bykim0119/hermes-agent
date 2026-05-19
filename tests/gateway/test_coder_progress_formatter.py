@@ -82,6 +82,55 @@ def test_codex_local_shell_call_renders_command():
     assert out == "▶️ pytest"
 
 
+def test_codex_command_execution_renders_command():
+    """Codex 0.121.0 emits item.type=command_execution for shell runs."""
+    out = format_event({
+        "event": "item.completed",
+        "data": {"item": {
+            "type": "command_execution",
+            "command": "ls /tmp",
+            "exit_code": 0,
+            "status": "completed",
+        }},
+    })
+    assert out == "▶️ ls /tmp"
+
+
+def test_codex_command_execution_strips_bash_wrapper():
+    """``/bin/bash -lc "<actual>"`` wrapping must collapse to the inner command."""
+    out = format_event({
+        "event": "item.completed",
+        "data": {"item": {
+            "type": "command_execution",
+            "command": '/bin/bash -lc "printf \'hi\' > /tmp/x"',
+            "exit_code": 0,
+        }},
+    })
+    assert out == "▶️ printf 'hi' > /tmp/x"
+
+
+def test_codex_command_execution_marks_nonzero_exit():
+    out = format_event({
+        "event": "item.completed",
+        "data": {"item": {
+            "type": "command_execution",
+            "command": "false",
+            "exit_code": 1,
+        }},
+    })
+    assert "▶️ false" in out
+    assert "exit 1" in out
+
+
+def test_codex_item_started_drops_silently():
+    """item.started is followed immediately by item.completed — render only one."""
+    out = format_event({
+        "event": "item.started",
+        "data": {"item": {"type": "command_execution", "command": "echo hi"}},
+    })
+    assert out is None
+
+
 def test_codex_turn_completed_with_usage():
     out = format_event({
         "event": "turn.completed",
