@@ -5964,6 +5964,34 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
+        if self.provider == "codex-exec" or str(client_kwargs.get("base_url", "")).startswith("codex-exec://"):
+            # codex-exec is process-backed — the base_url is a marker, not an
+            # HTTP endpoint. Return the CodexExecFacade directly so
+            # chat.completions.create() spawns ``codex exec --json`` instead of
+            # POSTing to "codex-exec://local/chat/completions". Resolve
+            # command/args from the same env-var path auxiliary_client uses
+            # since client_kwargs has already been stripped down to api_key +
+            # base_url by the time we get here.
+            from agent.codex_exec_client import CodexExecFacade
+            try:
+                from hermes_cli.auth import resolve_external_process_provider_credentials
+                _creds = resolve_external_process_provider_credentials("codex-exec")
+            except Exception as _e:
+                logger.warning("codex-exec credential resolution failed: %s", _e)
+                _creds = {}
+            client = CodexExecFacade(
+                api_key=client_kwargs.get("api_key"),
+                base_url=client_kwargs.get("base_url"),
+                command=_creds.get("command"),
+                args=_creds.get("args") or [],
+            )
+            logger.info(
+                "Codex-exec facade created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
         if self.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
             from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 

@@ -161,6 +161,7 @@ class CodexExecFacade:
         *,
         model: str | None = None,
         messages: list[dict[str, Any]] | None = None,
+        stream: bool = False,
         **_: Any,
     ) -> Any:
         goal = _extract_goal(messages or [])
@@ -198,6 +199,46 @@ class CodexExecFacade:
             total_tokens=usage_in + usage_out,
             prompt_tokens_details=SimpleNamespace(cached_tokens=usage_cached),
         )
+
+        if stream:
+            # AIAgent's chat_completions path consumes ``for chunk in stream``;
+            # collapse the whole Codex turn into a 2-chunk OpenAI-shaped stream:
+            # one carrying the full content delta, then a terminator with
+            # finish_reason + usage (matches stream_options={include_usage}).
+            _model = model or "codex-exec"
+            def _to_stream():
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(
+                            role="assistant",
+                            content=content,
+                            tool_calls=None,
+                            reasoning=None,
+                            reasoning_content=None,
+                        ),
+                        finish_reason=None,
+                        index=0,
+                    )],
+                    usage=None,
+                    model=_model,
+                )
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(
+                            role="assistant",
+                            content=None,
+                            tool_calls=None,
+                            reasoning=None,
+                            reasoning_content=None,
+                        ),
+                        finish_reason="stop",
+                        index=0,
+                    )],
+                    usage=usage,
+                    model=_model,
+                )
+            return _to_stream()
+
         assistant_message = SimpleNamespace(
             content=content,
             tool_calls=[],

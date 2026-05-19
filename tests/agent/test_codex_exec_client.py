@@ -137,6 +137,27 @@ def test_facade_populates_usage_from_turn_completed():
 # ---------------------------------------------------------------------------
 
 
+def test_facade_stream_yields_content_delta_and_terminator():
+    """stream=True returns a 2-chunk OpenAI-shaped iterable: content + finish."""
+    fake = _FakeClient([
+        CodexEvent("item.completed", {"item": {"type": "agent_message", "text": "result"}}),
+        CodexEvent("turn.completed", {"usage": {"input_tokens": 10, "output_tokens": 5, "cached_input_tokens": 0}}),
+    ])
+    facade = CodexExecFacade(workspace="/tmp", _client=fake)
+    stream = facade.chat.completions.create(
+        messages=[{"role": "user", "content": "go"}],
+        stream=True,
+    )
+    chunks = list(stream)
+    assert len(chunks) == 2
+    assert chunks[0].choices[0].delta.content == "result"
+    assert chunks[0].choices[0].finish_reason is None
+    assert chunks[1].choices[0].delta.content is None
+    assert chunks[1].choices[0].finish_reason == "stop"
+    assert chunks[1].usage.prompt_tokens == 10
+    assert chunks[1].usage.completion_tokens == 5
+
+
 def test_facade_inherits_progress_sink_from_contextvar():
     """If no explicit progress_callback is passed, the facade picks up the
     sink installed in the module-level ContextVar — this is how
