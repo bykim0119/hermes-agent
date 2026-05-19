@@ -50,8 +50,16 @@ class CodexExecClient:
         workspace: str,
         env: Optional[dict] = None,
     ) -> AsyncIterator[CodexEvent]:
-        """Run codex exec, yielding parsed events as they arrive."""
-        argv = [self.command, "exec", "--json", *self.extra_args, goal]
+        """Run codex exec, yielding parsed events as they arrive.
+
+        ``extra_args`` is expected to be the full argv tail after ``codex``
+        (the auth/env layer hands us "exec --json --skip-git-repo-check
+        --sandbox workspace-write" or equivalent); we just append the goal
+        as the final positional prompt. Hardcoding ``exec --json`` here on
+        top of that produced "the argument '--json' cannot be used multiple
+        times" because both layers were duplicating it.
+        """
+        argv = [self.command, *self.extra_args, goal]
         proc_env = {**os.environ, **(env or {})}
         proc = await asyncio.create_subprocess_exec(
             *argv,
