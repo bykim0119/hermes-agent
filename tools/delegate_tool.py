@@ -2338,9 +2338,9 @@ def _spawn_detached_coder(
     def _runner() -> None:
         # Imported lazily — codex_exec_client lives outside this package and
         # the import would create a cycle if pulled in at module top.
-        from agent.codex_exec_client import _FACADE_PROGRESS_SINK
+        from agent.codex_exec_client import register_coder_sink, unregister_coder_sink
 
-        token = _FACADE_PROGRESS_SINK.set(sink)
+        register_coder_sink(coder_run_id, sink)
         try:
             result = delegate_task(
                 parent_agent=parent_agent,
@@ -2365,7 +2365,7 @@ def _spawn_detached_coder(
                     rec["status"] = "failed"
                     rec["error"] = str(exc)
         finally:
-            _FACADE_PROGRESS_SINK.reset(token)
+            unregister_coder_sink(coder_run_id)
 
     thread = threading.Thread(
         target=_runner, name=f"coder-{coder_run_id}", daemon=True

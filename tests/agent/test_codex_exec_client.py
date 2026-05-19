@@ -158,11 +158,12 @@ def test_facade_stream_yields_content_delta_and_terminator():
     assert chunks[1].usage.completion_tokens == 5
 
 
-def test_facade_inherits_progress_sink_from_contextvar():
-    """If no explicit progress_callback is passed, the facade picks up the
-    sink installed in the module-level ContextVar — this is how
-    _spawn_detached_coder bridges Codex events back into the parent agent."""
-    from agent.codex_exec_client import _FACADE_PROGRESS_SINK
+def test_facade_inherits_sink_from_coder_registry():
+    """If no explicit progress_callback is passed but ``subagent_id`` matches
+    a sink registered via ``register_coder_sink``, the facade picks it up —
+    this is how _spawn_detached_coder bridges Codex events across thread
+    boundaries (ContextVars don't propagate to ThreadPoolExecutor workers)."""
+    from agent.codex_exec_client import register_coder_sink, unregister_coder_sink
 
     events = [
         CodexEvent("thread.started", {"thread_id": "t"}),
@@ -172,27 +173,32 @@ def test_facade_inherits_progress_sink_from_contextvar():
     captured: list = []
     sink = lambda ev: captured.append((ev.event, ev.data))
 
-    token = _FACADE_PROGRESS_SINK.set(sink)
+    register_coder_sink("coder-abc", sink)
     try:
-        facade = CodexExecFacade(workspace="/tmp", _client=_FakeClient(list(events)))
+        facade = CodexExecFacade(
+            workspace="/tmp",
+            subagent_id="coder-abc",
+            _client=_FakeClient(list(events)),
+        )
         facade.chat.completions.create(messages=[{"role": "user", "content": "go"}])
     finally:
-        _FACADE_PROGRESS_SINK.reset(token)
+        unregister_coder_sink("coder-abc")
 
     assert [e for e, _ in captured] == ["thread.started", "item.completed", "turn.completed"]
 
 
-def test_facade_explicit_callback_overrides_contextvar():
-    """Explicit progress_callback constructor arg wins over the ContextVar."""
-    from agent.codex_exec_client import _FACADE_PROGRESS_SINK
+def test_facade_explicit_callback_overrides_registry():
+    """Explicit progress_callback constructor arg wins over the registry."""
+    from agent.codex_exec_client import register_coder_sink, unregister_coder_sink
 
     sentinel_sink = lambda ev: None
     explicit = []
 
-    token = _FACADE_PROGRESS_SINK.set(sentinel_sink)
+    register_coder_sink("coder-xyz", sentinel_sink)
     try:
         facade = CodexExecFacade(
             workspace="/tmp",
+            subagent_id="coder-xyz",
             progress_callback=lambda ev: explicit.append(ev.event),
             _client=_FakeClient([
                 CodexEvent("item.completed", {"item": {"type": "agent_message", "text": "ok"}}),
@@ -200,7 +206,7 @@ def test_facade_explicit_callback_overrides_contextvar():
             ]),
         )
     finally:
-        _FACADE_PROGRESS_SINK.reset(token)
+        unregister_coder_sink("coder-xyz")
 
     facade.chat.completions.create(messages=[{"role": "user", "content": "x"}])
     assert "item.completed" in explicit

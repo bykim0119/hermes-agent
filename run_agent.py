@@ -5986,6 +5986,7 @@ class AIAgent:
                 base_url=client_kwargs.get("base_url"),
                 command=_creds.get("command"),
                 args=_creds.get("args") or [],
+                subagent_id=getattr(self, "_subagent_id", None),
             )
             logger.info(
                 "Codex-exec facade created (%s, shared=%s) %s",

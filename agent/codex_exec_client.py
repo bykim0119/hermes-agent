@@ -7,10 +7,10 @@ hermes coder subagent when delegating coding tasks to Codex CLI.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Optional
@@ -19,13 +19,30 @@ logger = logging.getLogger(__name__)
 
 FACADE_MARKER_BASE_URL = "codex-exec://local"
 
-# Cross-call bridge: when a coder subagent is being spawned, the orchestrator
-# installs a sink here so any CodexExecFacade created during that turn forwards
-# its NDJSON events back up to the parent's progress callback. Read by the
-# facade in __init__; set/reset in tools.delegate_tool._spawn_detached_coder.
-_FACADE_PROGRESS_SINK: contextvars.ContextVar[
-    Optional[Callable[["CodexEvent"], None]]
-] = contextvars.ContextVar("codex_exec_progress_sink", default=None)
+# Cross-thread bridge keyed by coder_run_id. ContextVars don't propagate across
+# raw threading.Thread / ThreadPoolExecutor boundaries by default, and the
+# child agent's facade is constructed inside the ThreadPoolExecutor worker
+# spawned by delegate_task — so the spawning thread can't publish the sink via
+# ContextVar. Instead, _spawn_detached_coder writes the sink here under the
+# coder_run_id key before delegate_task starts, and the facade looks it up at
+# construction time via the child agent's ``_subagent_id`` attribute.
+_CODER_SINKS: dict = {}
+_CODER_SINKS_LOCK = threading.Lock()
+
+
+def register_coder_sink(coder_run_id: str, sink: Callable[["CodexEvent"], None]) -> None:
+    with _CODER_SINKS_LOCK:
+        _CODER_SINKS[coder_run_id] = sink
+
+
+def unregister_coder_sink(coder_run_id: str) -> None:
+    with _CODER_SINKS_LOCK:
+        _CODER_SINKS.pop(coder_run_id, None)
+
+
+def get_coder_sink(coder_run_id: str) -> Optional[Callable[["CodexEvent"], None]]:
+    with _CODER_SINKS_LOCK:
+        return _CODER_SINKS.get(coder_run_id)
 
 
 @dataclass
@@ -145,15 +162,21 @@ class CodexExecFacade:
         args: list[str] | None = None,
         workspace: str | None = None,
         progress_callback: Optional[Callable[[CodexEvent], None]] = None,
+        subagent_id: str | None = None,
         _client: Any | None = None,
         **_: Any,
     ):
         self.api_key = api_key or "codex-exec"
         self.base_url = base_url or FACADE_MARKER_BASE_URL
         self._workspace = str(workspace or os.getcwd())
-        # Explicit constructor arg wins; otherwise inherit the sink the
-        # orchestrator may have published via ContextVar before spawning us.
-        self._progress_callback = progress_callback or _FACADE_PROGRESS_SINK.get()
+        # Explicit constructor arg wins; otherwise look up the sink that
+        # _spawn_detached_coder published under this coder_run_id.
+        if progress_callback is not None:
+            self._progress_callback = progress_callback
+        elif subagent_id:
+            self._progress_callback = get_coder_sink(subagent_id)
+        else:
+            self._progress_callback = None
         self._client = _client or CodexExecClient(
             command=command or "codex",
             extra_args=list(args or []),
