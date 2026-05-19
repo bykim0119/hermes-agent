@@ -3699,6 +3699,67 @@ class DiscordAdapter(BasePlatformAdapter):
                 exc,
             )
 
+    async def create_coder_thread(
+        self,
+        coder_run_id: str,
+        goal: str,
+        chat_id: str,
+        parent_thread_id: Optional[str] = None,
+    ) -> None:
+        """Open a Discord thread bound to a coder_run_id.
+
+        Called from gateway/run.py via ``coder_spawn_callback`` when the LLM
+        invokes ``delegate_task_background``. Sends an anchor message, opens a
+        thread off it, and registers the binding in ``_coder_sessions`` so
+        Phase-2 progress routing (subagent_progress events) and follow-up
+        replies in the thread can resolve back to the right coder run.
+
+        If the user mentioned Hermes inside an existing thread, the new coder
+        thread is created off the *parent* channel — Discord doesn't allow
+        nested threads.
+        """
+        if self._client is None:
+            return
+        try:
+            target_id = chat_id
+            channel = self._client.get_channel(int(target_id))
+            if channel is None:
+                channel = await self._client.fetch_channel(int(target_id))
+            if isinstance(channel, discord.Thread):
+                channel = channel.parent or channel
+                if channel is None:
+                    logger.warning(
+                        "[%s] Cannot create coder thread: parent channel missing for %s",
+                        self.name, target_id,
+                    )
+                    return
+            anchor = await channel.send(f"▶ 코더에게 위임 — `{coder_run_id}`")
+            thread_name = self._make_thread_name(goal)
+            thread = await anchor.create_thread(
+                name=thread_name,
+                auto_archive_duration=1440,
+            )
+            try:
+                self._coder_sessions.bind(
+                    coder_run_id=coder_run_id,
+                    thread_id=str(thread.id),
+                    parent_channel_id=str(channel.id),
+                )
+            except ValueError as exc:
+                # max_concurrent guard tripped — let the user know in the
+                # anchor channel and abandon the thread (it will auto-archive).
+                await channel.send(f"⚠️ {exc}")
+                return
+            try:
+                self._threads.mark_participated(str(thread.id))
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.exception(
+                "[%s] Failed to create coder thread for %s: %s",
+                self.name, coder_run_id, exc,
+            )
+
     # ------------------------------------------------------------------
     # Auto-thread helpers
     # ------------------------------------------------------------------

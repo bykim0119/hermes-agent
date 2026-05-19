@@ -14140,6 +14140,35 @@ class GatewayRunner:
                 _deliver_bg_review_message(message)
 
             agent.background_review_callback = _bg_review_send
+
+            def _coder_spawn(coder_run_id: str, goal: str) -> None:
+                """Adapter hook fired when delegate_task_background spawns a coder.
+
+                The platform adapter (currently only Discord) opens a dedicated
+                UI surface bound to ``coder_run_id`` so subsequent progress
+                events can be routed there (wired in Phase 2). When the active
+                adapter doesn't implement ``create_coder_thread`` this is a
+                no-op — the tool result still flows back through the normal
+                assistant turn.
+                """
+                if not _status_adapter or not _run_still_current():
+                    return
+                if not hasattr(_status_adapter, "create_coder_thread"):
+                    return
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        _status_adapter.create_coder_thread(
+                            coder_run_id=coder_run_id,
+                            goal=goal,
+                            chat_id=_status_chat_id,
+                            parent_thread_id=source.thread_id,
+                        ),
+                        _loop_for_step,
+                    )
+                except Exception as _e:
+                    logger.debug("coder_spawn_callback error: %s", _e)
+
+            agent.coder_spawn_callback = _coder_spawn
             # Register the release hook on the adapter so base.py's finally
             # block can fire it after delivering the main response.
             if _status_adapter and session_key:

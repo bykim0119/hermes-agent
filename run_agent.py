@@ -51,7 +51,7 @@ import threading
 from types import SimpleNamespace
 import urllib.request
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import Callable, List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
@@ -1300,6 +1300,11 @@ class AIAgent:
         self.tool_progress_callback = tool_progress_callback
         self.tool_start_callback = tool_start_callback
         self.tool_complete_callback = tool_complete_callback
+        # Optional callback fired by _dispatch_delegate_task_background when a
+        # coder sub-agent is spawned. Set by gateway/run.py per-turn so the
+        # active platform adapter (e.g. Discord) can open a dedicated thread
+        # bound to coder_run_id. Signature: (coder_run_id: str, goal: str).
+        self.coder_spawn_callback: Optional[Callable[[str, str], None]] = None
         self.suppress_status_output = False
         self.thinking_callback = thinking_callback
         self.reasoning_callback = reasoning_callback
@@ -9843,6 +9848,9 @@ class AIAgent:
 
         Mirrors _dispatch_delegate_task — the registry handler can't supply
         parent_agent, so the agent loop intercepts and injects ``self`` here.
+        On a successful spawn the agent fires ``coder_spawn_callback`` so the
+        active platform adapter can open a dedicated UI surface (e.g. a Discord
+        thread) bound to the returned ``coder_run_id``.
         """
         from tools.delegate_tool import delegate_task_background as _delegate_task_background
         result = _delegate_task_background(
@@ -9850,6 +9858,12 @@ class AIAgent:
             goal=function_args.get("goal"),
             context=function_args.get("context") or "",
         )
+        coder_run_id = result.get("coder_run_id") if isinstance(result, dict) else None
+        if coder_run_id and self.coder_spawn_callback is not None:
+            try:
+                self.coder_spawn_callback(coder_run_id, function_args.get("goal") or "")
+            except Exception as cb_err:
+                logging.debug(f"coder_spawn_callback error: {cb_err}")
         return json.dumps(result, ensure_ascii=False)
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
