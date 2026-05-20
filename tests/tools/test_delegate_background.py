@@ -73,7 +73,7 @@ def test_followup_argv_inserts_resume_with_session_id(monkeypatch):
 
     monkeypatch.setattr(
         "tools.delegate_tool._resolve_codex_command_and_args",
-        lambda: ("codex", ["exec", "--json", "--sandbox", "workspace-write"]),
+        lambda: ("codex", ["exec", "--json"]),
     )
     monkeypatch.setattr(
         "agent.codex_exec_client.CodexExecClient", _StubClient
@@ -93,9 +93,62 @@ def test_followup_argv_inserts_resume_with_session_id(monkeypatch):
     extras = captured.get("extra_args") or []
     # exec must come first, then resume + UUID, then the rest.
     assert extras[:4] == ["exec", "resume", "uuid-zzz", "--json"]
-    assert "--sandbox" in extras
     # The prompt is passed as ``goal`` to client.run, not in extra_args.
     assert captured.get("goal") == "and update the README too"
+
+
+def test_followup_argv_strips_sandbox_pair(monkeypatch):
+    """``codex exec resume`` rejects ``--sandbox`` (inherits parent session).
+
+    Regression for live smoke crash:
+        error: unexpected argument '--sandbox' found
+    The first-spawn args always include ``--sandbox <mode>`` (the user's env
+    typically sets ``danger-full-access``); the follow-up assembler must drop
+    that pair when constructing the resume argv.
+    """
+    from tools.delegate_tool import _spawn_followup_coder
+
+    captured = {}
+
+    class _StubClient:
+        def __init__(self, command, extra_args):
+            captured["extra_args"] = list(extra_args)
+
+        async def run(self, *, goal, workspace):
+            if False:
+                yield
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_codex_command_and_args",
+        lambda: (
+            "codex",
+            [
+                "exec", "--json", "--skip-git-repo-check",
+                "--sandbox", "danger-full-access",
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.codex_exec_client.CodexExecClient", _StubClient
+    )
+
+    _spawn_followup_coder(
+        coder_run_id="coder-sandbox",
+        codex_session_id="uuid-sandbox",
+        text="follow",
+    )
+    import time
+    time.sleep(0.2)
+
+    extras = captured.get("extra_args") or []
+    # Resume is positioned after exec.
+    assert extras[:3] == ["exec", "resume", "uuid-sandbox"]
+    # Sandbox flag + value MUST be gone.
+    assert "--sandbox" not in extras
+    assert "danger-full-access" not in extras
+    # Other flags survive.
+    assert "--json" in extras
+    assert "--skip-git-repo-check" in extras
 
 
 def test_followup_argv_handles_args_without_exec(monkeypatch):
@@ -114,7 +167,7 @@ def test_followup_argv_handles_args_without_exec(monkeypatch):
 
     monkeypatch.setattr(
         "tools.delegate_tool._resolve_codex_command_and_args",
-        lambda: ("codex", ["--sandbox", "danger-full-access"]),
+        lambda: ("codex", ["--json"]),  # missing the leading "exec"
     )
     monkeypatch.setattr(
         "agent.codex_exec_client.CodexExecClient", _StubClient
@@ -130,4 +183,4 @@ def test_followup_argv_handles_args_without_exec(monkeypatch):
 
     extras = captured.get("extra_args") or []
     assert extras[:3] == ["exec", "resume", "uuid-qq"]
-    assert "--sandbox" in extras
+    assert "--json" in extras

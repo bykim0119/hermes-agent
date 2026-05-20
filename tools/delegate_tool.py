@@ -2432,10 +2432,25 @@ def _spawn_followup_coder(
     sink = _build_coder_progress_sink(coder_run_id)
     command, base_args = _resolve_codex_command_and_args()
 
+    # ``codex exec resume`` inherits sandbox + config from the parent session,
+    # so the corresponding flags are *not* accepted on the resume subcommand
+    # (codex aborts with ``unexpected argument '--sandbox' found``). Strip
+    # value-pair options resume rejects before assembling the final argv.
+    _RESUME_REJECTED_PAIRS = {"--sandbox", "-s", "--profile", "-p"}
+    cleaned = []
+    skip_next = False
+    for a in base_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if a in _RESUME_REJECTED_PAIRS:
+            skip_next = True
+            continue
+        cleaned.append(a)
+
     # Insert "resume <UUID>" right after "exec" so the final argv is:
-    #   codex exec resume <UUID> --json --skip-git-repo-check ... <prompt>
-    # codex exec resume accepts the flags positionally after the subcommand.
-    extra_args = list(base_args)
+    #   codex exec resume <UUID> --json --skip-git-repo-check <prompt>
+    extra_args = list(cleaned)
     if "exec" in extra_args:
         i = extra_args.index("exec")
         extra_args[i + 1:i + 1] = ["resume", codex_session_id]
