@@ -707,6 +707,23 @@ class DiscordAdapter(BasePlatformAdapter):
                     )
                     adapter_self._coder_flusher.start()
 
+                # Publish this adapter's coder hook to the gateway-level bus so
+                # the coder sink (which runs in a background thread outside any
+                # parent agent turn) can route NDJSON events to our threads.
+                # set_global_sessions exposes our CoderSessionManager so the
+                # sink can capture codex session UUIDs from thread.started.
+                try:
+                    from gateway import coder_event_bus
+                    from gateway.coder_sessions import set_global_sessions
+
+                    set_global_sessions(adapter_self._coder_sessions)
+                    coder_event_bus.register_handler(
+                        adapter_self.on_coder_event,
+                        asyncio.get_running_loop(),
+                    )
+                except Exception as _e:
+                    logger.debug("[%s] coder_event_bus register failed: %s", adapter_self.name, _e)
+
             @self._client.event
             async def on_message(message: DiscordMessage):
                 # Block until _resolve_allowed_usernames has swapped
@@ -810,6 +827,22 @@ class DiscordAdapter(BasePlatformAdapter):
                         if "*" not in _free_channels and not (_channel_ids & _free_channels):
                             return
 
+                # Coder thread follow-up: if the message lands in a thread that
+                # is bound to an active coder session, route it to that coder
+                # instead of the main Hermes brain. This is unconditional once
+                # the thread is bound — the user opted into a coder workspace
+                # by being there.
+                if isinstance(message.channel, discord.Thread):
+                    _cid = adapter_self._coder_sessions.get_coder_by_thread(
+                        str(message.channel.id)
+                    )
+                    if _cid:
+                        adapter_self._coder_sessions.touch(_cid)
+                        await adapter_self._handle_coder_followup(
+                            _cid, message.content, message.channel
+                        )
+                        return
+
                 await self._handle_message(message)
 
             @self._client.event
@@ -893,6 +926,21 @@ class DiscordAdapter(BasePlatformAdapter):
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None
+
+        # Detach this adapter from the coder event bus + global sessions
+        # pointer so a stale handler can't be invoked after disconnect.
+        try:
+            from gateway import coder_event_bus
+            from gateway.coder_sessions import (
+                get_global_sessions,
+                set_global_sessions,
+            )
+
+            coder_event_bus.unregister_handler(self.on_coder_event)
+            if get_global_sessions() is self._coder_sessions:
+                set_global_sessions(None)
+        except Exception:
+            pass
 
         self._release_platform_lock()
 
@@ -3763,11 +3811,12 @@ class DiscordAdapter(BasePlatformAdapter):
     async def on_coder_event(self, subagent_id: str, event: dict) -> None:
         """Route a coder NDJSON event to the bound Discord thread.
 
-        Called from gateway/run.py's progress_callback (subagent_progress
-        branch). Lookup is cheap and tolerant — unknown coder_run_ids drop
-        silently because a thread bind may not yet have committed when the
-        first events stream in (or the coder finished before the bind), and
-        either case is recoverable on the next event.
+        Invoked via ``gateway.coder_event_bus`` from the coder sink (which
+        lives in a background daemon thread spawned by delegate_task_background
+        or by ``_handle_coder_followup``). Lookup is cheap and tolerant —
+        unknown coder_run_ids drop silently because a thread bind may not yet
+        have committed when the first events stream in (or the coder finished
+        before the bind), and either case is recoverable on the next event.
         """
         if not subagent_id or not event:
             return
@@ -3785,6 +3834,52 @@ class DiscordAdapter(BasePlatformAdapter):
             self._coder_sessions.touch(subagent_id)
         except Exception:
             pass
+
+    async def _handle_coder_followup(
+        self,
+        coder_run_id: str,
+        text: str,
+        thread: Any,
+    ) -> None:
+        """Forward a message in a coder-bound thread to ``codex exec resume``.
+
+        Uses the codex session UUID captured from the first spawn's
+        ``thread.started`` event to re-enter the same conversation context
+        (codex 0.121.0+). If the UUID is missing — older codex, eviction race,
+        or sandbox-blocked startup — we tell the user and abandon: a cold
+        spawn would silently lose the prior workspace state, which is worse
+        than an explicit error.
+        """
+        if not text or not text.strip():
+            return
+        codex_session_id = self._coder_sessions.get_codex_session_id(coder_run_id)
+        if not codex_session_id:
+            try:
+                await thread.send(
+                    "⚠️ 코더 세션 UUID 미기록 — `codex exec resume` 불가. "
+                    "새 위임으로 시작해주세요."
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            from tools.delegate_tool import _spawn_followup_coder
+
+            _spawn_followup_coder(
+                coder_run_id=coder_run_id,
+                codex_session_id=codex_session_id,
+                text=text,
+            )
+        except Exception as exc:
+            logger.exception(
+                "[%s] Failed to spawn coder follow-up for %s: %s",
+                self.name, coder_run_id, exc,
+            )
+            try:
+                await thread.send(f"❌ follow-up spawn 실패: {exc}")
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Auto-thread helpers

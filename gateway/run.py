@@ -13451,33 +13451,6 @@ class GatewayRunner:
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
-            # Coder subagent progress lives outside the parent turn lifecycle:
-            # delegate_task_background spawns a daemon thread that emits codex
-            # events long after the spawning turn ends, so the route below has
-            # to bypass progress_queue / _run_still_current gates (they belong
-            # to the parent's UI bubbles, not the bound coder thread). We only
-            # need the platform-adapter's event-loop + hook to still exist.
-            if event_type == "subagent_progress":
-                _subagent_id = kwargs.get("subagent_id")
-                _event_payload = kwargs.get("event")
-                if (
-                    _subagent_id
-                    and _event_payload
-                    and _status_adapter is not None
-                    and hasattr(_status_adapter, "on_coder_event")
-                ):
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            _status_adapter.on_coder_event(
-                                subagent_id=_subagent_id,
-                                event=_event_payload,
-                            ),
-                            _loop_for_step,
-                        )
-                    except Exception as _e:
-                        logger.debug("on_coder_event dispatch failed: %s", _e)
-                return
-
             if not progress_queue or not _run_still_current():
                 return
 

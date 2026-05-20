@@ -2292,28 +2292,30 @@ def get_coder_run(coder_run_id: str) -> Optional[Dict[str, Any]]:
         return dict(rec) if rec else None
 
 
-def _build_coder_progress_sink(parent_agent, coder_run_id: str):
+def _build_coder_progress_sink(coder_run_id: str):
     """Sink installed into CodexExecFacade so each NDJSON event is relayed
-    upward as a ``subagent_progress`` event tagged with the coder_run_id.
+    to every registered platform adapter via the coder event bus.
 
-    The parent agent's ``tool_progress_callback`` is the gateway-installed
-    progress sink (gateway/run.py); from there a ``subagent_progress`` branch
-    dispatches to the platform adapter's ``on_coder_event`` hook.
+    Previously the sink hopped through ``parent_agent.tool_progress_callback``,
+    but that callback only existed inside a parent-agent turn — follow-up
+    coder runs (spawned outside any parent turn) had no way to reach the
+    adapter. The bus removes the parent_agent dependency entirely.
+
+    Also captures the Codex CLI session UUID from the first ``thread.started``
+    event so subsequent follow-up turns can use ``codex exec resume <uuid>``
+    to re-enter the same conversation context.
     """
     def _sink(event) -> None:
-        parent_cb = getattr(parent_agent, "tool_progress_callback", None)
-        if parent_cb is None:
-            return
         try:
+            if event.event == "thread.started":
+                from gateway.coder_sessions import get_global_sessions
+                tid = (event.data or {}).get("thread_id")
+                sessions = get_global_sessions()
+                if tid and sessions is not None:
+                    sessions.set_codex_session_id(coder_run_id, tid)
+            from gateway import coder_event_bus
             payload = {"event": event.event, "data": event.data}
-            parent_cb(
-                "subagent_progress",
-                None,
-                None,
-                None,
-                subagent_id=coder_run_id,
-                event=payload,
-            )
+            coder_event_bus.dispatch(coder_run_id, payload)
         except Exception:
             logger.debug("coder progress sink relay failed", exc_info=True)
 
@@ -2333,7 +2335,7 @@ def _spawn_detached_coder(
     with subagent_id_override=coder_run_id so gateway can route its progress
     events to the matching Discord thread.
     """
-    sink = _build_coder_progress_sink(parent_agent, coder_run_id)
+    sink = _build_coder_progress_sink(coder_run_id)
 
     def _runner() -> None:
         # Imported lazily — codex_exec_client lives outside this package and
@@ -2372,6 +2374,96 @@ def _spawn_detached_coder(
     )
     thread.start()
     return coder_run_id
+
+
+def _resolve_codex_command_and_args() -> tuple[str, list[str]]:
+    """Resolve (command, base_args) for codex CLI invocation.
+
+    Mirrors the first-spawn resolution path (hermes_cli/auth.py via the
+    auxiliary_client) so follow-up calls inherit the same sandbox/flag set.
+    Falls back to env-only resolution if the auth helper isn't usable in this
+    process context (e.g. tests without provider config).
+    """
+    try:
+        from hermes_cli.auth import resolve_external_process_provider_credentials
+        creds = resolve_external_process_provider_credentials("codex-exec")
+        command = creds.get("command") or "codex"
+        base_args = list(creds.get("args") or [])
+        if base_args:
+            return command, base_args
+    except Exception:
+        pass
+
+    command = os.environ.get("HERMES_CODER_COMMAND", "codex")
+    raw_args = os.environ.get("HERMES_CODER_ARGS")
+    if raw_args:
+        base_args = raw_args.split()
+    else:
+        base_args = [
+            "exec", "--json", "--skip-git-repo-check",
+            "--sandbox", "workspace-write",
+        ]
+    return command, base_args
+
+
+def _spawn_followup_coder(
+    coder_run_id: str,
+    codex_session_id: str,
+    text: str,
+) -> None:
+    """Spawn ``codex exec resume <session_id> "<text>"`` in a daemon thread.
+
+    Used for thread follow-up messages: the user replies inside a coder-bound
+    Discord thread, we re-enter the same codex conversation context using the
+    session UUID captured from the original spawn's ``thread.started`` event.
+
+    Does NOT take a parent_agent — events flow through the gateway-level
+    coder event bus (via ``_build_coder_progress_sink``), not through a
+    parent's tool_progress_callback.
+
+    Workspace defaults to ``os.getcwd()`` (gateway service cwd), matching
+    the first-spawn default in CodexExecFacade. If first-spawn ever gets a
+    custom workspace, we'd want to store it on the coder_sessions row too —
+    out of scope for V1.
+    """
+    import asyncio as _asyncio
+    from agent.codex_exec_client import CodexExecClient
+
+    sink = _build_coder_progress_sink(coder_run_id)
+    command, base_args = _resolve_codex_command_and_args()
+
+    # Insert "resume <UUID>" right after "exec" so the final argv is:
+    #   codex exec resume <UUID> --json --skip-git-repo-check ... <prompt>
+    # codex exec resume accepts the flags positionally after the subcommand.
+    extra_args = list(base_args)
+    if "exec" in extra_args:
+        i = extra_args.index("exec")
+        extra_args[i + 1:i + 1] = ["resume", codex_session_id]
+    else:
+        extra_args = ["exec", "resume", codex_session_id, *extra_args]
+
+    client = CodexExecClient(command=command, extra_args=extra_args)
+    workspace = os.getcwd()
+
+    def _runner() -> None:
+        async def _consume() -> None:
+            async for event in client.run(goal=text, workspace=workspace):
+                try:
+                    sink(event)
+                except Exception:
+                    logger.debug("follow-up sink call failed", exc_info=True)
+
+        try:
+            _asyncio.run(_consume())
+        except Exception as exc:
+            logger.exception("Coder follow-up %s failed: %s", coder_run_id, exc)
+
+    th = threading.Thread(
+        target=_runner,
+        name=f"coder-followup-{coder_run_id}",
+        daemon=True,
+    )
+    th.start()
 
 
 def delegate_task_background(
