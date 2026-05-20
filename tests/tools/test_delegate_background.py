@@ -97,14 +97,16 @@ def test_followup_argv_inserts_resume_with_session_id(monkeypatch):
     assert captured.get("goal") == "and update the README too"
 
 
-def test_followup_argv_strips_sandbox_pair(monkeypatch):
-    """``codex exec resume`` rejects ``--sandbox`` (inherits parent session).
+def test_followup_argv_translates_sandbox_danger(monkeypatch):
+    """``--sandbox danger-full-access`` → ``--dangerously-bypass-approvals-and-sandbox``.
 
-    Regression for live smoke crash:
-        error: unexpected argument '--sandbox' found
-    The first-spawn args always include ``--sandbox <mode>`` (the user's env
-    typically sets ``danger-full-access``); the follow-up assembler must drop
-    that pair when constructing the resume argv.
+    Regression for two live-smoke failures:
+      1. ``error: unexpected argument '--sandbox' found`` — resume rejects the flag.
+      2. ``bwrap: loopback: Failed RTM_NEWADDR`` — naïvely dropping the pair
+         falls back to default ``workspace-write`` which crashes on this VM.
+
+    The fix translates each ``--sandbox <mode>`` to the resume-compatible
+    equivalent so the parent's effective sandbox mode is preserved.
     """
     from tools.delegate_tool import _spawn_followup_coder
 
@@ -141,14 +143,87 @@ def test_followup_argv_strips_sandbox_pair(monkeypatch):
     time.sleep(0.2)
 
     extras = captured.get("extra_args") or []
-    # Resume is positioned after exec.
     assert extras[:3] == ["exec", "resume", "uuid-sandbox"]
-    # Sandbox flag + value MUST be gone.
     assert "--sandbox" not in extras
     assert "danger-full-access" not in extras
-    # Other flags survive.
+    assert "--dangerously-bypass-approvals-and-sandbox" in extras
     assert "--json" in extras
     assert "--skip-git-repo-check" in extras
+
+
+def test_followup_argv_translates_sandbox_workspace_write(monkeypatch):
+    """``--sandbox workspace-write`` → ``--full-auto``."""
+    from tools.delegate_tool import _spawn_followup_coder
+
+    captured = {}
+
+    class _StubClient:
+        def __init__(self, command, extra_args):
+            captured["extra_args"] = list(extra_args)
+
+        async def run(self, *, goal, workspace):
+            if False:
+                yield
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_codex_command_and_args",
+        lambda: (
+            "codex",
+            ["exec", "--json", "--sandbox", "workspace-write"],
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.codex_exec_client.CodexExecClient", _StubClient
+    )
+
+    _spawn_followup_coder(
+        coder_run_id="coder-ws",
+        codex_session_id="uuid-ws",
+        text="follow",
+    )
+    import time
+    time.sleep(0.2)
+
+    extras = captured.get("extra_args") or []
+    assert "--sandbox" not in extras
+    assert "--full-auto" in extras
+
+
+def test_followup_argv_drops_profile_pair(monkeypatch):
+    """``--profile NAME`` is rejected by resume; drop the pair (parent already
+    used it to seed config)."""
+    from tools.delegate_tool import _spawn_followup_coder
+
+    captured = {}
+
+    class _StubClient:
+        def __init__(self, command, extra_args):
+            captured["extra_args"] = list(extra_args)
+
+        async def run(self, *, goal, workspace):
+            if False:
+                yield
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_codex_command_and_args",
+        lambda: ("codex", ["exec", "--json", "--profile", "myprof"]),
+    )
+    monkeypatch.setattr(
+        "agent.codex_exec_client.CodexExecClient", _StubClient
+    )
+
+    _spawn_followup_coder(
+        coder_run_id="coder-p",
+        codex_session_id="uuid-p",
+        text="hi",
+    )
+    import time
+    time.sleep(0.2)
+
+    extras = captured.get("extra_args") or []
+    assert "--profile" not in extras
+    assert "myprof" not in extras
+    assert "--json" in extras
 
 
 def test_followup_argv_handles_args_without_exec(monkeypatch):

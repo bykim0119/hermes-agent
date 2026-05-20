@@ -2432,21 +2432,34 @@ def _spawn_followup_coder(
     sink = _build_coder_progress_sink(coder_run_id)
     command, base_args = _resolve_codex_command_and_args()
 
-    # ``codex exec resume`` inherits sandbox + config from the parent session,
-    # so the corresponding flags are *not* accepted on the resume subcommand
-    # (codex aborts with ``unexpected argument '--sandbox' found``). Strip
-    # value-pair options resume rejects before assembling the final argv.
-    _RESUME_REJECTED_PAIRS = {"--sandbox", "-s", "--profile", "-p"}
+    # ``codex exec resume`` rejects ``--sandbox <mode>`` and ``--profile``
+    # value-pair options (it inherits config from the parent session), but
+    # contrary to expectation it does *not* auto-restore the parent's sandbox
+    # mode — it falls back to the default (workspace-write), which on this VM
+    # crashes bwrap loopback. So instead of just dropping the pairs, translate
+    # ``--sandbox X`` into the resume-compatible equivalent option.
+    _SANDBOX_RESUME_EQUIV = {
+        "danger-full-access": ["--dangerously-bypass-approvals-and-sandbox"],
+        "workspace-write": ["--full-auto"],
+        # read-only is the codex default; explicit equivalent isn't needed.
+        "read-only": [],
+    }
     cleaned = []
-    skip_next = False
-    for a in base_args:
-        if skip_next:
-            skip_next = False
+    i = 0
+    while i < len(base_args):
+        a = base_args[i]
+        if a in ("--sandbox", "-s"):
+            mode = base_args[i + 1] if i + 1 < len(base_args) else ""
+            cleaned.extend(_SANDBOX_RESUME_EQUIV.get(mode, []))
+            i += 2
             continue
-        if a in _RESUME_REJECTED_PAIRS:
-            skip_next = True
+        if a in ("--profile", "-p"):
+            # Profile flag also rejected by resume; drop value pair entirely
+            # (parent session already used the profile to seed config).
+            i += 2
             continue
         cleaned.append(a)
+        i += 1
 
     # Insert "resume <UUID>" right after "exec" so the final argv is:
     #   codex exec resume <UUID> --json --skip-git-repo-check <prompt>
