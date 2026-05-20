@@ -43,3 +43,34 @@ def test_max_concurrent_active():
     assert mgr.active_count() == 2
     with pytest.raises(ValueError, match="max_concurrent"):
         mgr.bind("c3", "t3", "ch")
+
+
+def test_codex_session_id_roundtrip():
+    mgr = CoderSessionManager()
+    mgr.bind("coder-r", "t-r", "ch")
+    assert mgr.get_codex_session_id("coder-r") is None
+    mgr.set_codex_session_id("coder-r", "uuid-abc-123")
+    assert mgr.get_codex_session_id("coder-r") == "uuid-abc-123"
+
+
+def test_codex_session_id_unknown_coder_is_noop():
+    mgr = CoderSessionManager()
+    # set on a coder that was never bound is a no-op (no exception)
+    mgr.set_codex_session_id("ghost", "uuid-xyz")
+    assert mgr.get_codex_session_id("ghost") is None
+
+
+def test_global_sessions_pointer():
+    from gateway.coder_sessions import (
+        set_global_sessions,
+        get_global_sessions,
+    )
+
+    assert get_global_sessions() is None
+    mgr = CoderSessionManager()
+    set_global_sessions(mgr)
+    try:
+        assert get_global_sessions() is mgr
+    finally:
+        set_global_sessions(None)
+    assert get_global_sessions() is None

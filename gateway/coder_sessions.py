@@ -21,6 +21,10 @@ class _Session:
     coder_run_id: str
     thread_id: str
     parent_channel_id: str
+    # Codex CLI session UUID emitted by ``thread.started`` events. Captured on
+    # first spawn so follow-up turns can use ``codex exec resume <uuid>`` to
+    # re-enter the same conversation context instead of restarting cold.
+    codex_session_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     last_activity_at: float = field(default_factory=time.time)
 
@@ -72,6 +76,17 @@ class CoderSessionManager:
             if sess:
                 self._by_thread.pop(sess.thread_id, None)
 
+    def set_codex_session_id(self, coder_run_id: str, session_id: str) -> None:
+        with self._lock:
+            sess = self._by_coder.get(coder_run_id)
+            if sess:
+                sess.codex_session_id = session_id
+
+    def get_codex_session_id(self, coder_run_id: str) -> Optional[str]:
+        with self._lock:
+            sess = self._by_coder.get(coder_run_id)
+            return sess.codex_session_id if sess else None
+
     def tick(self) -> int:
         """Housekeeping: evict idle sessions. Returns count evicted."""
         with self._lock:
@@ -92,3 +107,19 @@ class CoderSessionManager:
             if sess:
                 self._by_thread.pop(sess.thread_id, None)
         return len(evicted)
+
+
+# Module-level pointer to the gateway's active CoderSessionManager. The Discord
+# adapter publishes its instance here at startup so the coder sink (which lives
+# in tools/delegate_tool.py, outside the gateway package boundary) can resolve
+# the manager without a parameter chain or circular import.
+_GLOBAL_SESSIONS: Optional["CoderSessionManager"] = None
+
+
+def set_global_sessions(sessions: Optional["CoderSessionManager"]) -> None:
+    global _GLOBAL_SESSIONS
+    _GLOBAL_SESSIONS = sessions
+
+
+def get_global_sessions() -> Optional["CoderSessionManager"]:
+    return _GLOBAL_SESSIONS
