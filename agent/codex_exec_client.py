@@ -59,6 +59,31 @@ class CodexExecClient:
     ):
         self.command = command
         self.extra_args = list(extra_args or [])
+        # Set in ``run()`` once the subprocess is spawned. ``terminate()``
+        # uses this to signal the codex CLI on cancellation.
+        self._proc: Optional[asyncio.subprocess.Process] = None
+
+    def terminate(self) -> bool:
+        """Send SIGTERM to the codex process *group* if one is alive.
+
+        Process-group kill (``os.killpg``) rather than ``proc.terminate()``
+        because codex spawns child processes (bash, editor commands) that
+        would outlive a SIGTERM to just the parent. ``run()`` arranges the
+        new session via ``start_new_session=True`` so the group is the
+        whole codex subtree.
+        """
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return False
+        try:
+            import signal as _signal
+            os.killpg(proc.pid, _signal.SIGTERM)
+            return True
+        except ProcessLookupError:
+            return False
+        except Exception:
+            logger.debug("CodexExecClient.terminate failed", exc_info=True)
+            return False
 
     async def run(
         self,
@@ -84,7 +109,9 @@ class CodexExecClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=proc_env,
+            start_new_session=True,
         )
+        self._proc = proc
         assert proc.stdout is not None
         async for line in proc.stdout:
             text = line.decode("utf-8", errors="replace").rstrip("\n")
@@ -181,6 +208,16 @@ class CodexExecFacade:
             command=command or "codex",
             extra_args=list(args or []),
         )
+        # Make the underlying client reachable from ``cancel_coder_run`` for
+        # the natural-language delegation path. The slash/follow-up path
+        # attaches in ``_spawn_codex_coder`` directly. Lazy import to avoid
+        # a tools → agent → tools cycle at module load.
+        if subagent_id:
+            try:
+                from tools.delegate_tool import _attach_coder_client
+                _attach_coder_client(subagent_id, self._client)
+            except Exception:
+                logger.debug("CodexExecFacade attach failed", exc_info=True)
         self.chat = _FacadeChatNamespace(self)
         self.is_closed = False
 

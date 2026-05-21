@@ -837,6 +837,10 @@ class DiscordAdapter(BasePlatformAdapter):
                         str(message.channel.id)
                     )
                     if _cid:
+                        from tools.delegate_tool import is_cancel_command
+                        if is_cancel_command(message.content):
+                            await adapter_self._cancel_coder_run(_cid, message.channel)
+                            return
                         adapter_self._coder_sessions.touch(_cid)
                         await adapter_self._handle_coder_followup(
                             _cid, message.content, message.channel
@@ -3926,6 +3930,48 @@ class DiscordAdapter(BasePlatformAdapter):
             await interaction.delete_original_response()
         except Exception:
             pass
+
+    async def _cancel_coder_run(
+        self,
+        coder_run_id: str,
+        thread: Any,
+    ) -> None:
+        """Cancel an active coder run from inside its Discord thread.
+
+        Triggered when ``is_cancel_command`` matches a thread message. We
+        SIGTERM the codex process group via ``cancel_coder_run`` and post
+        a terminal message. The session binding is removed so any race
+        with a late ``thread.completed`` event doesn't re-touch the slot.
+        We do NOT delete or archive the thread — the user can scroll the
+        captured progress, which is usually why they cancelled.
+        """
+        try:
+            from tools.delegate_tool import cancel_coder_run
+        except Exception as exc:
+            logger.exception(
+                "[%s] cancel import failed for %s: %s",
+                self.name, coder_run_id, exc,
+            )
+            try:
+                await thread.send(f"❌ 취소 import 실패: {exc}")
+            except Exception:
+                pass
+            return
+
+        ok = bool(cancel_coder_run(coder_run_id))
+        try:
+            if ok:
+                await thread.send("❌ 취소됨")
+            else:
+                await thread.send(
+                    f"⚠️ 취소 시도 — 코더(`{coder_run_id}`)가 이미 종료/미등록"
+                )
+        except Exception:
+            logger.debug("cancel announce failed", exc_info=True)
+        try:
+            self._coder_sessions.unbind(coder_run_id)
+        except Exception:
+            logger.debug("coder_sessions.unbind failed", exc_info=True)
 
     async def _handle_coder_followup(
         self,

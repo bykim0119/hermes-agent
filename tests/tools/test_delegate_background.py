@@ -344,3 +344,152 @@ def test_followup_argv_handles_args_without_exec(monkeypatch):
     extras = captured.get("extra_args") or []
     assert extras[:3] == ["exec", "resume", "uuid-qq"]
     assert "--json" in extras
+
+
+# ---------------------------------------------------------------------------
+# Task 11 — cancellation (TDD)
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_unknown_run_returns_false():
+    """Calling ``cancel_coder_run`` on an id that isn't registered must be a
+    no-op that returns False — never raises, never mutates the registry.
+
+    This is the cheapest behavior to lock in first: it guarantees the
+    cancel surface is safe to call from message handlers without prior
+    existence checks, which keeps the Discord adapter code dumber.
+    """
+    from tools.delegate_tool import _CODER_RUN_REGISTRY, cancel_coder_run
+
+    assert "coder-does-not-exist" not in _CODER_RUN_REGISTRY
+    assert cancel_coder_run("coder-does-not-exist") is False
+    assert "coder-does-not-exist" not in _CODER_RUN_REGISTRY
+
+
+def test_cancel_terminates_attached_client_and_marks_status():
+    """When a client has been attached for this coder_run_id, cancel calls
+    ``client.terminate()`` and flips registry status to ``cancelled``.
+
+    The attach happens in the spawn paths (covered by a separate test) —
+    here we install the client by hand to isolate the cancel behavior.
+    Status change is what surfaces "this run is dead" to other gateway
+    code (e.g. the event bus, which could otherwise keep flushing
+    debounced events to a closed thread)."""
+    from tools.delegate_tool import (
+        _CODER_RUN_REGISTRY,
+        _attach_coder_client,
+        _register_coder_run,
+        cancel_coder_run,
+    )
+
+    coder_run_id = "coder-cancel-with-client"
+    _register_coder_run(coder_run_id, "parent-task-A", "do thing")
+
+    fake_client = MagicMock()
+    fake_client.terminate.return_value = True
+    _attach_coder_client(coder_run_id, fake_client)
+
+    try:
+        with patch("tools.delegate_tool.interrupt_subagent", return_value=False):
+            ok = cancel_coder_run(coder_run_id)
+
+        assert ok is True
+        fake_client.terminate.assert_called_once()
+        assert _CODER_RUN_REGISTRY[coder_run_id]["status"] == "cancelled"
+    finally:
+        _CODER_RUN_REGISTRY.pop(coder_run_id, None)
+
+
+def test_cancel_falls_back_to_interrupt_subagent_when_no_client():
+    """The natural-language path's facade may not have attached its client
+    yet if cancellation lands during the boot window (registry rec
+    exists but ``client`` not set). In that case we still want cancel to
+    take effect via ``interrupt_subagent`` — its parent AIAgent shell
+    will tear the in-flight chat completion down."""
+    from tools.delegate_tool import (
+        _CODER_RUN_REGISTRY,
+        _register_coder_run,
+        cancel_coder_run,
+    )
+
+    coder_run_id = "coder-cancel-no-client"
+    _register_coder_run(coder_run_id, "parent-task-B", "another")
+    assert _CODER_RUN_REGISTRY[coder_run_id].get("client") is None
+
+    try:
+        with patch("tools.delegate_tool.interrupt_subagent", return_value=True):
+            ok = cancel_coder_run(coder_run_id)
+        assert ok is True
+        assert _CODER_RUN_REGISTRY[coder_run_id]["status"] == "cancelled"
+    finally:
+        _CODER_RUN_REGISTRY.pop(coder_run_id, None)
+
+
+def test_spawn_codex_coder_attaches_client_to_registry():
+    """The slash and follow-up spawn path must register its client into the
+    coder run record. Without this, ``cancel_coder_run`` finds the rec
+    but ``rec.get("client")`` is None and the kill never happens.
+
+    Mocks CodexExecClient so the test doesn't actually fork codex; we
+    just need to observe that the client instance becomes reachable."""
+    from tools.delegate_tool import (
+        _CODER_RUN_REGISTRY,
+        _register_coder_run,
+        _spawn_codex_coder,
+    )
+
+    captured_client = {}
+
+    class _FakeClient:
+        def __init__(self, command=None, extra_args=None):
+            captured_client["instance"] = self
+            self.command = command
+            self.extra_args = list(extra_args or [])
+
+        async def run(self, *, goal, workspace, env=None):
+            if False:  # pragma: no cover - generator that yields nothing
+                yield None
+
+    coder_run_id = "coder-attach-spawn"
+    _register_coder_run(coder_run_id, "parent-task-S", "spawn-test")
+
+    try:
+        with patch("agent.codex_exec_client.CodexExecClient", _FakeClient), \
+             patch(
+                 "tools.delegate_tool._resolve_codex_command_and_args",
+                 return_value=("codex", ["exec", "--json"]),
+             ):
+            _spawn_codex_coder(coder_run_id, "hello")
+
+        import time
+        time.sleep(0.2)
+        assert _CODER_RUN_REGISTRY[coder_run_id].get("client") is captured_client.get("instance")
+    finally:
+        _CODER_RUN_REGISTRY.pop(coder_run_id, None)
+
+
+def test_is_cancel_command_recognizes_bang_prefixed_tokens():
+    """``!cancel`` and ``!stop`` (case-insensitive, surrounding whitespace
+    tolerated) are the only triggers. The ``!`` prefix is required so
+    natural follow-up messages that happen to contain the word ``cancel``
+    (e.g. "cancel that approach and try again") still flow to codex as
+    real instructions."""
+    from tools.delegate_tool import is_cancel_command
+
+    assert is_cancel_command("!cancel") is True
+    assert is_cancel_command("!stop") is True
+    assert is_cancel_command("  !CANCEL  ") is True
+    assert is_cancel_command("!Stop") is True
+
+
+def test_is_cancel_command_rejects_plain_words_and_followups():
+    """Words without the bang prefix must NOT trigger cancellation —
+    those are valid follow-up instructions to codex."""
+    from tools.delegate_tool import is_cancel_command
+
+    assert is_cancel_command("cancel") is False
+    assert is_cancel_command("stop") is False
+    assert is_cancel_command("cancel that approach") is False
+    assert is_cancel_command("!cancel that") is False  # extra args, not a clean cancel
+    assert is_cancel_command("") is False
+    assert is_cancel_command(None) is False

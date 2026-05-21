@@ -2292,6 +2292,54 @@ def get_coder_run(coder_run_id: str) -> Optional[Dict[str, Any]]:
         return dict(rec) if rec else None
 
 
+# Bang-prefixed control tokens. A bare ``cancel`` is rejected by
+# ``is_cancel_command`` because such a word can legitimately appear in a
+# follow-up instruction; the prefix marks an explicit gateway command.
+_CODER_CANCEL_COMMANDS = frozenset({"!cancel", "!stop"})
+
+
+def is_cancel_command(text: Optional[str]) -> bool:
+    """True iff ``text`` (after strip+lower) is a recognized cancel command.
+
+    Used by the Discord adapter's thread message router to short-circuit
+    follow-up forwarding when the user wants to terminate the run.
+    """
+    if not text:
+        return False
+    return text.strip().lower() in _CODER_CANCEL_COMMANDS
+
+
+def _attach_coder_client(coder_run_id: str, client: Any) -> None:
+    """Attach an active CodexExecClient so ``cancel_coder_run`` can reach it."""
+    with _CODER_RUN_LOCK:
+        rec = _CODER_RUN_REGISTRY.get(coder_run_id)
+        if rec is not None:
+            rec["client"] = client
+
+
+def cancel_coder_run(coder_run_id: str) -> bool:
+    """Cancel an active coder run. Returns True if cancellation took effect."""
+    with _CODER_RUN_LOCK:
+        rec = _CODER_RUN_REGISTRY.get(coder_run_id)
+    if rec is None:
+        return False
+    client = rec.get("client")
+    proc_killed = False
+    if client is not None:
+        try:
+            proc_killed = bool(client.terminate())
+        except Exception:
+            logger.debug("cancel_coder_run: client.terminate failed", exc_info=True)
+    agent_interrupted = interrupt_subagent(coder_run_id)
+    if proc_killed or agent_interrupted:
+        with _CODER_RUN_LOCK:
+            rec2 = _CODER_RUN_REGISTRY.get(coder_run_id)
+            if rec2 is not None and rec2.get("status") == "running":
+                rec2["status"] = "cancelled"
+        return True
+    return False
+
+
 def _build_coder_progress_sink(coder_run_id: str):
     """Sink installed into CodexExecFacade so each NDJSON event is relayed
     to every registered platform adapter via the coder event bus.
@@ -2482,6 +2530,7 @@ def _spawn_codex_coder(
             extra_args = ["exec", *extra_args]
 
     client = CodexExecClient(command=command, extra_args=extra_args)
+    _attach_coder_client(coder_run_id, client)
     workspace = os.getcwd()
     kind = "followup" if resume_session_id else "fresh"
 
