@@ -2406,25 +2406,37 @@ def _resolve_codex_command_and_args() -> tuple[str, list[str]]:
     return command, base_args
 
 
-def _spawn_followup_coder(
+def _spawn_codex_coder(
     coder_run_id: str,
-    codex_session_id: str,
     text: str,
+    *,
+    resume_session_id: Optional[str] = None,
 ) -> None:
-    """Spawn ``codex exec resume <session_id> "<text>"`` in a daemon thread.
+    """Spawn a codex coder process in a daemon thread.
 
-    Used for thread follow-up messages: the user replies inside a coder-bound
-    Discord thread, we re-enter the same codex conversation context using the
-    session UUID captured from the original spawn's ``thread.started`` event.
+    Two modes:
+      * ``resume_session_id=None`` — fresh ``codex exec`` invocation. Used by
+        the ``/code`` slash command which starts a brand-new coder thread
+        without going through the LLM-driven ``delegate_task_background``.
+      * ``resume_session_id="<UUID>"`` — ``codex exec resume <UUID>`` to
+        re-enter an existing conversation. Used for Discord thread follow-up
+        messages. The UUID was captured from the original spawn's
+        ``thread.started`` event.
 
-    Does NOT take a parent_agent — events flow through the gateway-level
-    coder event bus (via ``_build_coder_progress_sink``), not through a
-    parent's tool_progress_callback.
+    Both modes share:
+      * Gateway-level sink (``_build_coder_progress_sink``) — no parent_agent
+        dependency. Events flow through ``coder_event_bus``.
+      * Workspace = ``os.getcwd()`` (gateway service cwd) — matches the
+        CodexExecFacade default used by ``delegate_task_background``.
 
-    Workspace defaults to ``os.getcwd()`` (gateway service cwd), matching
-    the first-spawn default in CodexExecFacade. If first-spawn ever gets a
-    custom workspace, we'd want to store it on the coder_sessions row too —
-    out of scope for V1.
+    Resume-only sanitization: codex's ``resume`` subcommand rejects some
+    value-pair options that ``exec`` accepts (``--sandbox <mode>``,
+    ``--profile``). The first-spawn args include those, so we translate
+    each ``--sandbox X`` into the resume-compatible equivalent (e.g.
+    ``danger-full-access`` → ``--dangerously-bypass-approvals-and-sandbox``)
+    and drop ``--profile`` (parent already used it to seed config).
+    Without translation resume falls back to default ``workspace-write``,
+    which crashes bwrap loopback on this VM.
     """
     import asyncio as _asyncio
     from agent.codex_exec_client import CodexExecClient
@@ -2432,46 +2444,46 @@ def _spawn_followup_coder(
     sink = _build_coder_progress_sink(coder_run_id)
     command, base_args = _resolve_codex_command_and_args()
 
-    # ``codex exec resume`` rejects ``--sandbox <mode>`` and ``--profile``
-    # value-pair options (it inherits config from the parent session), but
-    # contrary to expectation it does *not* auto-restore the parent's sandbox
-    # mode — it falls back to the default (workspace-write), which on this VM
-    # crashes bwrap loopback. So instead of just dropping the pairs, translate
-    # ``--sandbox X`` into the resume-compatible equivalent option.
-    _SANDBOX_RESUME_EQUIV = {
-        "danger-full-access": ["--dangerously-bypass-approvals-and-sandbox"],
-        "workspace-write": ["--full-auto"],
-        # read-only is the codex default; explicit equivalent isn't needed.
-        "read-only": [],
-    }
-    cleaned = []
-    i = 0
-    while i < len(base_args):
-        a = base_args[i]
-        if a in ("--sandbox", "-s"):
-            mode = base_args[i + 1] if i + 1 < len(base_args) else ""
-            cleaned.extend(_SANDBOX_RESUME_EQUIV.get(mode, []))
-            i += 2
-            continue
-        if a in ("--profile", "-p"):
-            # Profile flag also rejected by resume; drop value pair entirely
-            # (parent session already used the profile to seed config).
-            i += 2
-            continue
-        cleaned.append(a)
-        i += 1
+    if resume_session_id:
+        _SANDBOX_RESUME_EQUIV = {
+            "danger-full-access": ["--dangerously-bypass-approvals-and-sandbox"],
+            "workspace-write": ["--full-auto"],
+            # read-only is the codex default; explicit equivalent isn't needed.
+            "read-only": [],
+        }
+        cleaned = []
+        i = 0
+        while i < len(base_args):
+            a = base_args[i]
+            if a in ("--sandbox", "-s"):
+                mode = base_args[i + 1] if i + 1 < len(base_args) else ""
+                cleaned.extend(_SANDBOX_RESUME_EQUIV.get(mode, []))
+                i += 2
+                continue
+            if a in ("--profile", "-p"):
+                i += 2
+                continue
+            cleaned.append(a)
+            i += 1
 
-    # Insert "resume <UUID>" right after "exec" so the final argv is:
-    #   codex exec resume <UUID> --json --skip-git-repo-check <prompt>
-    extra_args = list(cleaned)
-    if "exec" in extra_args:
-        i = extra_args.index("exec")
-        extra_args[i + 1:i + 1] = ["resume", codex_session_id]
+        # Insert "resume <UUID>" right after "exec" so the final argv is:
+        #   codex exec resume <UUID> --json --skip-git-repo-check <prompt>
+        extra_args = list(cleaned)
+        if "exec" in extra_args:
+            i = extra_args.index("exec")
+            extra_args[i + 1:i + 1] = ["resume", resume_session_id]
+        else:
+            extra_args = ["exec", "resume", resume_session_id, *extra_args]
     else:
-        extra_args = ["exec", "resume", codex_session_id, *extra_args]
+        # Fresh spawn — use base_args verbatim. ``exec`` accepts ``--sandbox``
+        # so no translation needed.
+        extra_args = list(base_args)
+        if "exec" not in extra_args:
+            extra_args = ["exec", *extra_args]
 
     client = CodexExecClient(command=command, extra_args=extra_args)
     workspace = os.getcwd()
+    kind = "followup" if resume_session_id else "fresh"
 
     def _runner() -> None:
         async def _consume() -> None:
@@ -2479,19 +2491,29 @@ def _spawn_followup_coder(
                 try:
                     sink(event)
                 except Exception:
-                    logger.debug("follow-up sink call failed", exc_info=True)
+                    logger.debug("coder sink call failed", exc_info=True)
 
         try:
             _asyncio.run(_consume())
         except Exception as exc:
-            logger.exception("Coder follow-up %s failed: %s", coder_run_id, exc)
+            logger.exception("Coder %s run %s failed: %s", kind, coder_run_id, exc)
 
     th = threading.Thread(
         target=_runner,
-        name=f"coder-followup-{coder_run_id}",
+        name=f"coder-{kind}-{coder_run_id}",
         daemon=True,
     )
     th.start()
+
+
+def _spawn_followup_coder(
+    coder_run_id: str,
+    codex_session_id: str,
+    text: str,
+) -> None:
+    """Back-compat wrapper — Discord adapter calls this from
+    ``_handle_coder_followup``. Forwards to ``_spawn_codex_coder``."""
+    _spawn_codex_coder(coder_run_id, text, resume_session_id=codex_session_id)
 
 
 def delegate_task_background(

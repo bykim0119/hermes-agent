@@ -189,6 +189,91 @@ def test_followup_argv_translates_sandbox_workspace_write(monkeypatch):
     assert "--full-auto" in extras
 
 
+def test_fresh_spawn_keeps_sandbox(monkeypatch):
+    """``_spawn_codex_coder`` (no resume_session_id) is a fresh ``codex exec``
+    invocation — ``exec`` accepts ``--sandbox`` so it must be preserved verbatim.
+
+    Used by ``/code`` slash command: brand-new coder thread starting from a
+    cold codex session. The whole point of fresh-mode vs follow-up-mode is
+    that resume sanitization (sandbox translation, profile dropping) only
+    applies to resume.
+    """
+    from tools.delegate_tool import _spawn_codex_coder
+
+    captured = {}
+
+    class _StubClient:
+        def __init__(self, command, extra_args):
+            captured["extra_args"] = list(extra_args)
+
+        async def run(self, *, goal, workspace):
+            captured["goal"] = goal
+            if False:
+                yield
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_codex_command_and_args",
+        lambda: (
+            "codex",
+            [
+                "exec", "--json", "--skip-git-repo-check",
+                "--sandbox", "danger-full-access",
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "agent.codex_exec_client.CodexExecClient", _StubClient
+    )
+
+    _spawn_codex_coder(
+        coder_run_id="coder-fresh",
+        text="build calc",
+        # no resume_session_id → fresh
+    )
+    import time
+    time.sleep(0.2)
+
+    extras = captured.get("extra_args") or []
+    assert extras[0] == "exec"
+    assert "resume" not in extras
+    # Sandbox flag + value preserved (fresh exec accepts them).
+    assert "--sandbox" in extras
+    assert "danger-full-access" in extras
+    # Goal is passed as prompt to client.run, not argv.
+    assert captured.get("goal") == "build calc"
+
+
+def test_fresh_spawn_prepends_exec_if_missing(monkeypatch):
+    """Defensive: fresh spawn always starts with ``exec`` even if base args
+    don't include it (config edge case)."""
+    from tools.delegate_tool import _spawn_codex_coder
+
+    captured = {}
+
+    class _StubClient:
+        def __init__(self, command, extra_args):
+            captured["extra_args"] = list(extra_args)
+
+        async def run(self, *, goal, workspace):
+            if False:
+                yield
+
+    monkeypatch.setattr(
+        "tools.delegate_tool._resolve_codex_command_and_args",
+        lambda: ("codex", ["--json"]),
+    )
+    monkeypatch.setattr(
+        "agent.codex_exec_client.CodexExecClient", _StubClient
+    )
+
+    _spawn_codex_coder(coder_run_id="coder-fp", text="x")
+    import time
+    time.sleep(0.2)
+
+    extras = captured.get("extra_args") or []
+    assert extras[0] == "exec"
+
+
 def test_followup_argv_drops_profile_pair(monkeypatch):
     """``--profile NAME`` is rejected by resume; drop the pair (parent already
     used it to seed config)."""

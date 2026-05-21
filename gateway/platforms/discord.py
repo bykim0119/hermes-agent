@@ -3097,6 +3097,11 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_background(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
 
+        @tree.command(name="code", description="Spawn a coder sub-agent for this task")
+        @discord.app_commands.describe(task="The coding task to delegate to the coder")
+        async def slash_code(interaction: discord.Interaction, task: str):
+            await self._handle_code_slash(interaction, task)
+
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -3832,6 +3837,93 @@ class DiscordAdapter(BasePlatformAdapter):
         await self._coder_flusher.add(thread_id, text)
         try:
             self._coder_sessions.touch(subagent_id)
+        except Exception:
+            pass
+
+    async def _handle_code_slash(
+        self,
+        interaction: 'discord.Interaction',
+        task: str,
+    ) -> None:
+        """Handle ``/code <task>`` — spawn a fresh coder thread without going
+        through the main Hermes turn.
+
+        This is the deterministic shortcut for coding delegation: the LLM
+        sometimes picks ``delegate_task`` (in-turn) instead of
+        ``delegate_task_background`` even with the AGENTS.md guide, so this
+        slash bypasses LLM tool selection entirely. End result is identical
+        to a successful natural-language delegation — same thread anchor,
+        same coder bus routing, same follow-up support.
+
+        Mirrors the follow-up path's "parent_agent-free spawn" pattern: we
+        call ``_spawn_codex_coder`` directly (no resume) instead of going
+        through delegate_task_background → AIAgent → CodexExecFacade.
+        """
+        if not await self._check_slash_authorization(interaction, "/code"):
+            return
+        if not task or not task.strip():
+            await interaction.response.send_message(
+                "Usage: `/code <task>` — describe the coding task to delegate.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        import uuid as _uuid
+
+        coder_run_id = f"coder-{_uuid.uuid4().hex[:8]}"
+        parent_task_id = f"slash:/code:{interaction.user.id}"
+
+        try:
+            from tools.delegate_tool import _register_coder_run, _spawn_codex_coder
+        except Exception as exc:
+            logger.exception("[%s] /code import failed: %s", self.name, exc)
+            await interaction.followup.send(f"❌ /code import 실패: {exc}", ephemeral=True)
+            return
+
+        _register_coder_run(coder_run_id, parent_task_id, task)
+
+        # Create thread (anchor message + bind to coder_sessions). If we're
+        # inside an existing thread, anchor in the parent channel — Discord
+        # disallows nested threads.
+        try:
+            channel = interaction.channel
+            chat_id = str(channel.id)
+            parent_thread_id = None
+            if isinstance(channel, discord.Thread):
+                parent_thread_id = chat_id
+                parent_channel = channel.parent
+                if parent_channel is not None:
+                    chat_id = str(parent_channel.id)
+            await self.create_coder_thread(
+                coder_run_id=coder_run_id,
+                goal=task,
+                chat_id=chat_id,
+                parent_thread_id=parent_thread_id,
+            )
+        except Exception as exc:
+            logger.exception("[%s] /code thread creation failed: %s", self.name, exc)
+            await interaction.followup.send(
+                f"❌ 스레드 생성 실패: {exc}", ephemeral=True
+            )
+            return
+
+        # Spawn the coder (fresh — no resume_session_id). thread.started will
+        # populate codex_session_id so follow-up messages in the thread work.
+        try:
+            _spawn_codex_coder(coder_run_id=coder_run_id, text=task)
+        except Exception as exc:
+            logger.exception("[%s] /code spawn failed: %s", self.name, exc)
+            await interaction.followup.send(
+                f"❌ 코더 시작 실패: {exc}", ephemeral=True
+            )
+            return
+
+        # Clean up the ephemeral defer; the public anchor + thread are now
+        # carrying the conversation.
+        try:
+            await interaction.delete_original_response()
         except Exception:
             pass
 
