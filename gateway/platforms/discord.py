@@ -558,9 +558,21 @@ class DiscordAdapter(BasePlatformAdapter):
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
         self._threads = ThreadParticipationTracker("discord")
-        # Coder sub-agent infrastructure (codex-exec via delegate_task_background)
-        _coder_idle = int(os.getenv("HERMES_CODER_IDLE_TIMEOUT_S", "7200"))
-        _coder_max = int(os.getenv("HERMES_CODER_MAX_CONCURRENT", "3"))
+        # Coder sub-agent infrastructure (codex-exec via delegate_task_background).
+        # Priority: env > delegation.coder.<key> in config.yaml > default.
+        from gateway.coder_config import coder_setting
+        _coder_idle = coder_setting(
+            "idle_timeout_seconds",
+            env_var="HERMES_CODER_IDLE_TIMEOUT_S",
+            default=7200,
+            cast=int,
+        )
+        _coder_max = coder_setting(
+            "max_concurrent",
+            env_var="HERMES_CODER_MAX_CONCURRENT",
+            default=3,
+            cast=int,
+        )
         self._coder_sessions = CoderSessionManager(
             idle_timeout_seconds=_coder_idle, max_concurrent=_coder_max
         )
@@ -701,8 +713,14 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # Start the coder progress debouncer (publishes to threads).
                 if adapter_self._coder_flusher is None:
+                    from gateway.coder_config import coder_setting
                     adapter_self._coder_flusher = DebouncedFlusher(
-                        interval_ms=int(os.getenv("HERMES_CODER_DEBOUNCE_MS", "250")),
+                        interval_ms=coder_setting(
+                            "progress_debounce_ms",
+                            env_var="HERMES_CODER_DEBOUNCE_MS",
+                            default=250,
+                            cast=int,
+                        ),
                         publish=adapter_self._publish_to_thread,
                     )
                     adapter_self._coder_flusher.start()
@@ -3874,6 +3892,17 @@ class DiscordAdapter(BasePlatformAdapter):
 
         await interaction.response.defer(ephemeral=True)
 
+        # Pre-check codex auth so the user sees a specific message instead
+        # of an opaque process failure inside the thread.
+        try:
+            from gateway.coder_config import check_codex_auth
+            auth_err = check_codex_auth()
+        except Exception:
+            auth_err = None  # never block on the pre-check itself
+        if auth_err:
+            await interaction.followup.send(f"❌ {auth_err}", ephemeral=True)
+            return
+
         import uuid as _uuid
 
         coder_run_id = f"coder-{_uuid.uuid4().hex[:8]}"
@@ -3989,6 +4018,17 @@ class DiscordAdapter(BasePlatformAdapter):
         than an explicit error.
         """
         if not text or not text.strip():
+            return
+        try:
+            from gateway.coder_config import check_codex_auth
+            auth_err = check_codex_auth()
+        except Exception:
+            auth_err = None
+        if auth_err:
+            try:
+                await thread.send(f"❌ {auth_err}")
+            except Exception:
+                pass
             return
         codex_session_id = self._coder_sessions.get_codex_session_id(coder_run_id)
         if not codex_session_id:

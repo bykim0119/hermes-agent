@@ -2424,28 +2424,52 @@ def _spawn_detached_coder(
     return coder_run_id
 
 
+_RESOLVE_SENTINEL = object()
+
+
 def _resolve_codex_command_and_args() -> tuple[str, list[str]]:
     """Resolve (command, base_args) for codex CLI invocation.
 
-    Mirrors the first-spawn resolution path (hermes_cli/auth.py via the
-    auxiliary_client) so follow-up calls inherit the same sandbox/flag set.
-    Falls back to env-only resolution if the auth helper isn't usable in this
-    process context (e.g. tests without provider config).
-    """
-    try:
-        from hermes_cli.auth import resolve_external_process_provider_credentials
-        creds = resolve_external_process_provider_credentials("codex-exec")
-        command = creds.get("command") or "codex"
-        base_args = list(creds.get("args") or [])
-        if base_args:
-            return command, base_args
-    except Exception:
-        pass
+    Priority for each field is:
+      env > delegation.coder.<key> in config > auth resolver creds > hardcoded default.
 
-    command = os.environ.get("HERMES_CODER_COMMAND", "codex")
-    raw_args = os.environ.get("HERMES_CODER_ARGS")
-    if raw_args:
-        base_args = raw_args.split()
+    The auth resolver (``hermes_cli.auth``) provides the canonical
+    ``codex`` binary path discovered from provider config plus a default
+    args set. Operator-supplied env or config values must be able to
+    override those, otherwise ``delegation.coder.args`` is meaningless
+    on hosts where the auth resolver succeeds with its own args.
+    """
+    from gateway.coder_config import coder_setting
+
+    explicit_command = coder_setting(
+        "command",
+        env_var="HERMES_CODER_COMMAND",
+        default=_RESOLVE_SENTINEL,
+    )
+    explicit_args = coder_setting(
+        "args",
+        env_var="HERMES_CODER_ARGS",
+        default=_RESOLVE_SENTINEL,
+    )
+
+    auth_command: Optional[str] = None
+    auth_args: Optional[list[str]] = None
+    if explicit_command is _RESOLVE_SENTINEL or explicit_args is _RESOLVE_SENTINEL:
+        try:
+            from hermes_cli.auth import resolve_external_process_provider_credentials
+            creds = resolve_external_process_provider_credentials("codex-exec")
+            auth_command = creds.get("command") or None
+            auth_args = list(creds.get("args") or []) or None
+        except Exception:
+            pass
+
+    command = explicit_command if explicit_command is not _RESOLVE_SENTINEL else (auth_command or "codex")
+
+    if explicit_args is not _RESOLVE_SENTINEL:
+        raw_args = explicit_args
+        base_args = raw_args.split() if isinstance(raw_args, str) else list(raw_args)
+    elif auth_args:
+        base_args = list(auth_args)
     else:
         base_args = [
             "exec", "--json", "--skip-git-repo-check",
@@ -2585,6 +2609,18 @@ def delegate_task_background(
         return {"error": "delegate_task_background requires a parent agent context."}
     if not goal:
         return {"error": "delegate_task_background requires a non-empty goal."}
+
+    # Surface missing/expired codex auth as a structured error instead of
+    # letting codex fail mid-NDJSON-stream with an opaque returncode.
+    from gateway.coder_config import check_codex_auth
+    auth_err = check_codex_auth()
+    if auth_err:
+        return {
+            "coder_run_id": None,
+            "status": "auth_error",
+            "error": auth_err,
+            "goal": goal,
+        }
 
     coder_run_id = f"coder-{_uuid.uuid4().hex[:8]}"
     parent_task_id = (

@@ -482,6 +482,98 @@ def test_is_cancel_command_recognizes_bang_prefixed_tokens():
     assert is_cancel_command("!Stop") is True
 
 
+def test_delegate_task_background_short_circuits_on_bad_auth():
+    """A missing/expired codex auth surfaces as a structured error before
+    we spawn anything. Otherwise codex would fail mid-NDJSON-stream and
+    the user would see an opaque ``returncode=N`` inside their thread
+    instead of "your token is expired, run `codex login`".
+    """
+    from tools.delegate_tool import delegate_task_background
+
+    parent = MagicMock()
+    parent.task_id = "parent-auth"
+
+    with patch(
+        "gateway.coder_config.check_codex_auth",
+        return_value="Codex OAuth 만료 — `codex login` 재실행 필요",
+    ), patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn:
+        result = delegate_task_background(
+            parent_agent=parent,
+            goal="rename Y",
+            context="",
+        )
+
+    mock_spawn.assert_not_called()
+    assert result.get("status") == "auth_error"
+    assert "만료" in result.get("error", "")
+    assert result.get("coder_run_id") is None
+
+
+def test_resolve_codex_command_falls_back_to_config_when_env_unset(monkeypatch):
+    """When the auth resolver returns no creds and no env vars are set,
+    ``_resolve_codex_command_and_args`` must consult ``delegation.coder``
+    in config.yaml before falling to the hardcoded default.
+
+    Without this, operators who set ``args:`` in config.yaml would still
+    see codex spawn with ``workspace-write`` (the default) because the
+    old behavior dropped straight from "no env" to "default", skipping
+    config entirely."""
+    from tools.delegate_tool import _resolve_codex_command_and_args
+
+    monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
+    monkeypatch.delenv("HERMES_CODER_ARGS", raising=False)
+    with patch(
+        "hermes_cli.auth.resolve_external_process_provider_credentials",
+        return_value={"command": None, "args": []},
+    ), patch(
+        "gateway.coder_config.load_config",
+        return_value={"delegation": {"coder": {
+            "command": "codex-from-config",
+            "args": "exec --json --skip-git-repo-check --sandbox danger-full-access",
+        }}},
+    ):
+        cmd, args = _resolve_codex_command_and_args()
+
+    assert cmd == "codex-from-config"
+    assert "--sandbox" in args
+    assert "danger-full-access" in args
+
+
+def test_resolve_codex_command_config_overrides_auth_resolver_args(monkeypatch):
+    """When config has explicit ``args`` set, it wins over whatever the
+    credential auth resolver returns. Without this, config.yaml as the
+    durable home for codex args is meaningless — auth would always
+    return ``workspace-write`` defaults and silently shadow operator
+    intent expressed in config.
+
+    Priority: env > delegation.coder.args (config) > auth resolver creds > hardcoded default.
+    """
+    from tools.delegate_tool import _resolve_codex_command_and_args
+
+    monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
+    monkeypatch.delenv("HERMES_CODER_ARGS", raising=False)
+    with patch(
+        "hermes_cli.auth.resolve_external_process_provider_credentials",
+        return_value={
+            "command": "/usr/bin/codex",
+            "args": ["exec", "--json", "--skip-git-repo-check",
+                     "--sandbox", "workspace-write"],
+        },
+    ), patch(
+        "gateway.coder_config.load_config",
+        return_value={"delegation": {"coder": {
+            "args": "exec --json --skip-git-repo-check --sandbox danger-full-access",
+        }}},
+    ):
+        cmd, args = _resolve_codex_command_and_args()
+
+    # config's --sandbox value wins over auth's workspace-write
+    assert "danger-full-access" in args
+    assert "workspace-write" not in args
+    # command falls through to auth since config didn't set one
+    assert cmd == "/usr/bin/codex"
+
+
 def test_is_cancel_command_rejects_plain_words_and_followups():
     """Words without the bang prefix must NOT trigger cancellation —
     those are valid follow-up instructions to codex."""
