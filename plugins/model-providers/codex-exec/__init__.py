@@ -2,7 +2,7 @@
 
 codex-exec runs an external `codex exec --json` subprocess that drives an
 internal agent loop and emits NDJSON events. The CodexExecFacade
-(agent/codex_exec_client.py) wraps it in an OpenAI chat-completion shape so
+(plugins.subagent_coder.codex_exec_client.py) wraps it in an OpenAI chat-completion shape so
 hermes' AIAgent can treat the whole Codex turn as a single LLM call.
 """
 

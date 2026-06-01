@@ -5974,7 +5974,7 @@ class AIAgent:
             # command/args from the same env-var path auxiliary_client uses
             # since client_kwargs has already been stripped down to api_key +
             # base_url by the time we get here.
-            from agent.codex_exec_client import CodexExecFacade
+            from plugins.subagent_coder.codex_exec_client import CodexExecFacade
             try:
                 from hermes_cli.auth import resolve_external_process_provider_credentials
                 _creds = resolve_external_process_provider_credentials("codex-exec")

@@ -10,7 +10,7 @@ def test_returns_immediately_with_handle():
     parent.task_id = "parent-task-1"
 
     with patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn, \
-         patch("gateway.coder_config.check_codex_auth", return_value=None):
+         patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
             goal="add function X to foo.py",
@@ -32,7 +32,7 @@ def test_records_coder_run_for_thread_routing():
 
     with patch("tools.delegate_tool._spawn_detached_coder"), \
          patch("tools.delegate_tool._register_coder_run") as mock_register, \
-         patch("gateway.coder_config.check_codex_auth", return_value=None):
+         patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
             goal="rename Y",
@@ -78,7 +78,7 @@ def test_followup_argv_inserts_resume_with_session_id(monkeypatch):
         lambda: ("codex", ["exec", "--json"]),
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_followup_coder(
@@ -133,7 +133,7 @@ def test_followup_argv_translates_sandbox_danger(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_followup_coder(
@@ -175,7 +175,7 @@ def test_followup_argv_translates_sandbox_workspace_write(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_followup_coder(
@@ -224,7 +224,7 @@ def test_fresh_spawn_keeps_sandbox(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_codex_coder(
@@ -265,7 +265,7 @@ def test_fresh_spawn_prepends_exec_if_missing(monkeypatch):
         lambda: ("codex", ["--json"]),
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_codex_coder(coder_run_id="coder-fp", text="x")
@@ -296,7 +296,7 @@ def test_followup_argv_drops_profile_pair(monkeypatch):
         lambda: ("codex", ["exec", "--json", "--profile", "myprof"]),
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_followup_coder(
@@ -332,7 +332,7 @@ def test_followup_argv_handles_args_without_exec(monkeypatch):
         lambda: ("codex", ["--json"]),  # missing the leading "exec"
     )
     monkeypatch.setattr(
-        "agent.codex_exec_client.CodexExecClient", _StubClient
+        "plugins.subagent_coder.codex_exec_client.CodexExecClient", _StubClient
     )
 
     _spawn_followup_coder(
@@ -456,7 +456,7 @@ def test_spawn_codex_coder_attaches_client_to_registry():
     _register_coder_run(coder_run_id, "parent-task-S", "spawn-test")
 
     try:
-        with patch("agent.codex_exec_client.CodexExecClient", _FakeClient), \
+        with patch("plugins.subagent_coder.codex_exec_client.CodexExecClient", _FakeClient), \
              patch(
                  "tools.delegate_tool._resolve_codex_command_and_args",
                  return_value=("codex", ["exec", "--json"]),
@@ -496,7 +496,7 @@ def test_delegate_task_background_short_circuits_on_bad_auth():
     parent.task_id = "parent-auth"
 
     with patch(
-        "gateway.coder_config.check_codex_auth",
+        "plugins.subagent_coder.coder_config.check_codex_auth",
         return_value="Codex OAuth 만료 — `codex login` 재실행 필요",
     ), patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn:
         result = delegate_task_background(
@@ -528,7 +528,7 @@ def test_resolve_codex_command_falls_back_to_config_when_env_unset(monkeypatch):
         "hermes_cli.auth.resolve_external_process_provider_credentials",
         return_value={"command": None, "args": []},
     ), patch(
-        "gateway.coder_config.load_config",
+        "plugins.subagent_coder.coder_config.load_config",
         return_value={"delegation": {"coder": {
             "command": "codex-from-config",
             "args": "exec --json --skip-git-repo-check --sandbox danger-full-access",
@@ -562,7 +562,7 @@ def test_resolve_codex_command_config_overrides_auth_resolver_args(monkeypatch):
                      "--sandbox", "workspace-write"],
         },
     ), patch(
-        "gateway.coder_config.load_config",
+        "plugins.subagent_coder.coder_config.load_config",
         return_value={"delegation": {"coder": {
             "args": "exec --json --skip-git-repo-check --sandbox danger-full-access",
         }}},

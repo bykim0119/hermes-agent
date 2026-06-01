@@ -5,7 +5,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from agent.codex_exec_client import CodexExecClient, CodexEvent, CodexExecFacade
+from plugins.subagent_coder.codex_exec_client import CodexExecClient, CodexEvent, CodexExecFacade
 
 
 @pytest.mark.asyncio
@@ -163,7 +163,7 @@ def test_facade_inherits_sink_from_coder_registry():
     a sink registered via ``register_coder_sink``, the facade picks it up —
     this is how _spawn_detached_coder bridges Codex events across thread
     boundaries (ContextVars don't propagate to ThreadPoolExecutor workers)."""
-    from agent.codex_exec_client import register_coder_sink, unregister_coder_sink
+    from plugins.subagent_coder.codex_exec_client import register_coder_sink, unregister_coder_sink
 
     events = [
         CodexEvent("thread.started", {"thread_id": "t"}),
@@ -189,7 +189,7 @@ def test_facade_inherits_sink_from_coder_registry():
 
 def test_facade_explicit_callback_overrides_registry():
     """Explicit progress_callback constructor arg wins over the registry."""
-    from agent.codex_exec_client import register_coder_sink, unregister_coder_sink
+    from plugins.subagent_coder.codex_exec_client import register_coder_sink, unregister_coder_sink
 
     sentinel_sink = lambda ev: None
     explicit = []

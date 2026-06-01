@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from gateway import coder_event_bus
+from plugins.subagent_coder import coder_event_bus
 
 
 @pytest.fixture(autouse=True)

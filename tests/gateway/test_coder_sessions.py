@@ -2,7 +2,7 @@
 import time
 import pytest
 
-from gateway.coder_sessions import CoderSessionManager
+from plugins.subagent_coder.coder_sessions import CoderSessionManager
 
 
 def test_bind_and_resolve_thread():
@@ -61,7 +61,7 @@ def test_codex_session_id_unknown_coder_is_noop():
 
 
 def test_global_sessions_pointer():
-    from gateway.coder_sessions import (
+    from plugins.subagent_coder.coder_sessions import (
         set_global_sessions,
         get_global_sessions,
     )

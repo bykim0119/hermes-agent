@@ -2676,7 +2676,7 @@ def resolve_provider_client(
                     "process credentials are incomplete"
                 )
                 return None, None
-            from agent.codex_exec_client import CodexExecFacade
+            from plugins.subagent_coder.codex_exec_client import CodexExecFacade
 
             client = CodexExecFacade(
                 api_key=api_key,

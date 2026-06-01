@@ -3,7 +3,7 @@
 Includes CJK (Korean) chunk regression cases per
 project_acp_codex_orchestrator memo (OpenClaw bug #2).
 """
-from gateway.coder_progress_formatter import format_event, MAX_CHUNK_CHARS
+from plugins.subagent_coder.coder_progress_formatter import format_event, MAX_CHUNK_CHARS
 
 
 def test_read_file_event():

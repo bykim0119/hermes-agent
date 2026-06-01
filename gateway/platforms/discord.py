@@ -51,8 +51,8 @@ from gateway.config import Platform, PlatformConfig
 import re
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
-from gateway.coder_sessions import CoderSessionManager
-from gateway.coder_progress_formatter import (
+from plugins.subagent_coder.coder_sessions import CoderSessionManager
+from plugins.subagent_coder.coder_progress_formatter import (
     DebouncedFlusher,
     format_event as _format_coder_event,
 )
@@ -560,7 +560,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._threads = ThreadParticipationTracker("discord")
         # Coder sub-agent infrastructure (codex-exec via delegate_task_background).
         # Priority: env > delegation.coder.<key> in config.yaml > default.
-        from gateway.coder_config import coder_setting
+        from plugins.subagent_coder.coder_config import coder_setting
         _coder_idle = coder_setting(
             "idle_timeout_seconds",
             env_var="HERMES_CODER_IDLE_TIMEOUT_S",
@@ -713,7 +713,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # Start the coder progress debouncer (publishes to threads).
                 if adapter_self._coder_flusher is None:
-                    from gateway.coder_config import coder_setting
+                    from plugins.subagent_coder.coder_config import coder_setting
                     adapter_self._coder_flusher = DebouncedFlusher(
                         interval_ms=coder_setting(
                             "progress_debounce_ms",
@@ -731,8 +731,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 # set_global_sessions exposes our CoderSessionManager so the
                 # sink can capture codex session UUIDs from thread.started.
                 try:
-                    from gateway import coder_event_bus
-                    from gateway.coder_sessions import set_global_sessions
+                    from plugins.subagent_coder import coder_event_bus
+                    from plugins.subagent_coder.coder_sessions import set_global_sessions
 
                     set_global_sessions(adapter_self._coder_sessions)
                     coder_event_bus.register_handler(
@@ -952,8 +952,8 @@ class DiscordAdapter(BasePlatformAdapter):
         # Detach this adapter from the coder event bus + global sessions
         # pointer so a stale handler can't be invoked after disconnect.
         try:
-            from gateway import coder_event_bus
-            from gateway.coder_sessions import (
+            from plugins.subagent_coder import coder_event_bus
+            from plugins.subagent_coder.coder_sessions import (
                 get_global_sessions,
                 set_global_sessions,
             )
@@ -3838,7 +3838,7 @@ class DiscordAdapter(BasePlatformAdapter):
     async def on_coder_event(self, subagent_id: str, event: dict) -> None:
         """Route a coder NDJSON event to the bound Discord thread.
 
-        Invoked via ``gateway.coder_event_bus`` from the coder sink (which
+        Invoked via ``plugins.subagent_coder.coder_event_bus`` from the coder sink (which
         lives in a background daemon thread spawned by delegate_task_background
         or by ``_handle_coder_followup``). Lookup is cheap and tolerant —
         unknown coder_run_ids drop silently because a thread bind may not yet
@@ -3895,7 +3895,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Pre-check codex auth so the user sees a specific message instead
         # of an opaque process failure inside the thread.
         try:
-            from gateway.coder_config import check_codex_auth
+            from plugins.subagent_coder.coder_config import check_codex_auth
             auth_err = check_codex_auth()
         except Exception:
             auth_err = None  # never block on the pre-check itself
@@ -4020,7 +4020,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not text or not text.strip():
             return
         try:
-            from gateway.coder_config import check_codex_auth
+            from plugins.subagent_coder.coder_config import check_codex_auth
             auth_err = check_codex_auth()
         except Exception:
             auth_err = None
