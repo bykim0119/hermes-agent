@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 
+from . import codex_provider
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,5 +23,6 @@ def register(ctx) -> None:
     ``ctx``는 ``PluginContext(manifest, manager)`` (hermes_cli/plugins.py).
     """
     logger.info("subagent_coder: register(ctx) started")
-    # Task 2~8에서 각 wire를 차례로 추가.
-    logger.info("subagent_coder: register(ctx) complete (skeleton)")
+    codex_provider.register_codex_provider(ctx)
+    # Task 4~8에서 tool/overlay/slot wire를 차례로 추가.
+    logger.info("subagent_coder: register(ctx) complete (codex-exec provider)")

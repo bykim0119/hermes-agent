@@ -32,4 +32,12 @@ codex_exec = CodexExecProfile(
     auth_type="external_process",
 )
 
-register_provider(codex_exec)
+def register_codex_provider(ctx) -> None:
+    """subagent_coder.register(ctx)에서 호출 — codex-exec provider를 전역 등록.
+
+    provider 등록은 ``providers`` 전역 레지스트리(``register_provider``)를 통하므로
+    ``ctx``는 사용하지 않는다. 과거에는 module import 부작용으로 등록됐으나
+    (별도 ``model-providers/codex-exec`` plugin), 이제 코더 관련 wiring 전부를
+    subagent_coder의 단일 ``register(ctx)`` 진입점으로 모은다.
+    """
+    register_provider(codex_exec)
