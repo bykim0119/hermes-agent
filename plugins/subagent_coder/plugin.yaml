@@ -1,0 +1,7 @@
+name: subagent_coder
+label: "Codex Coder Sub-Agent (Discord)"
+description: |
+  Background coding delegation via Codex CLI.
+  Spawns ``codex exec`` subprocess in a daemon thread and routes
+  live progress to the platform UI.
+  Currently integrates with Discord; core is platform-agnostic.
