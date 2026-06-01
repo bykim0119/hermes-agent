@@ -25,8 +25,53 @@ def register(ctx) -> None:
     logger.info("subagent_coder: register(ctx) started")
     codex_provider.register_codex_provider(ctx)
     _register_external_process_defaults()
-    # Task 6~8에서 auth resolver/overlay/slot wire를 차례로 추가.
-    logger.info("subagent_coder: register(ctx) complete (provider + ext-process defaults)")
+    _install_delegate_dispatch_wrap()
+    # Task 6~8: auth resolver / Discord overlay / coder_spawn_callback slot.
+    logger.info("subagent_coder: register(ctx) complete (provider + defaults + dispatch wrap)")
+
+
+def _install_delegate_dispatch_wrap() -> None:
+    """Runtime-wrap AIAgent._invoke_tool to inject parent_agent for the coder.
+
+    Why a monkey-patch instead of editing run_agent.py: the registry dispatch
+    path (model_tools.handle_function_call -> registry.dispatch) never forwards
+    parent_agent to handlers — verified, and upstream's own delegate_task uses
+    an inline _dispatch for exactly this reason. By wrapping here at register
+    time, the coder works on a STOCK hermes (no run_agent.py edits), which is
+    what makes subagent_coder installable as a standalone ~/.hermes/plugins/ unit.
+
+    parent_agent is taken from ``self`` directly (not a ContextVar) so it
+    survives the concurrent path's worker threads — ContextVars don't propagate
+    across the ThreadPoolExecutor boundary (lesson from coder commit fd0d901a).
+
+    NOTE: covers the concurrent path (_invoke_tool). The sequential path
+    (_execute_tool_calls_sequential) dispatches inline and is wired separately.
+    """
+    import json
+
+    from run_agent import AIAgent
+
+    if getattr(AIAgent, "_subagent_coder_dispatch_wrapped", False):
+        return
+
+    _orig_invoke_tool = AIAgent._invoke_tool
+
+    def _wrapped_invoke_tool(self, function_name, function_args, *args, **kwargs):
+        if function_name == "delegate_task_background":
+            from tools.delegate_tool import delegate_task_background
+            return json.dumps(
+                delegate_task_background(
+                    parent_agent=self,
+                    goal=function_args.get("goal"),
+                    context=function_args.get("context") or "",
+                ),
+                ensure_ascii=False,
+            )
+        return _orig_invoke_tool(self, function_name, function_args, *args, **kwargs)
+
+    AIAgent._invoke_tool = _wrapped_invoke_tool
+    AIAgent._subagent_coder_dispatch_wrapped = True
+    logger.info("subagent_coder: AIAgent._invoke_tool wrapped for coder dispatch")
 
 
 def _register_external_process_defaults() -> None:
