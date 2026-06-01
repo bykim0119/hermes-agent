@@ -2636,6 +2636,16 @@ def delegate_task_background(
         coder_run_id=coder_run_id,
         provider=provider or "codex-exec",
     )
+    # Fire coder_spawn_callback so the active platform adapter can open a UI
+    # surface (e.g. a Discord thread) bound to coder_run_id. Lives here (not in
+    # run_agent's inline dispatch) so the registry handler path and any caller
+    # get the same behavior — see P1 plan Step 4.7 (agent-loop elif removal).
+    spawn_cb = getattr(parent_agent, "coder_spawn_callback", None)
+    if coder_run_id and spawn_cb is not None:
+        try:
+            spawn_cb(coder_run_id, goal or "")
+        except Exception as cb_err:
+            logger.debug("coder_spawn_callback error: %s", cb_err)
     return {"coder_run_id": coder_run_id, "status": "spawned", "goal": goal}
 
 

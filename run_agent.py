@@ -9875,13 +9875,13 @@ class AIAgent:
         )
 
     def _dispatch_delegate_task_background(self, function_args: dict) -> str:
-        """Single call site for delegate_task_background dispatch.
+        """Thin parent_agent-injecting site for delegate_task_background.
 
-        Mirrors _dispatch_delegate_task — the registry handler can't supply
-        parent_agent, so the agent loop intercepts and injects ``self`` here.
-        On a successful spawn the agent fires ``coder_spawn_callback`` so the
-        active platform adapter can open a dedicated UI surface (e.g. a Discord
-        thread) bound to the returned ``coder_run_id``.
+        Mirrors _dispatch_delegate_task. Required because the registry dispatch
+        path (model_tools.handle_function_call -> registry.dispatch) does NOT
+        forward parent_agent to handlers — so coder delegation must inject
+        ``self`` here. coder_spawn_callback (Discord thread opening) is fired
+        inside delegate_task_background itself, so any caller gets it.
         """
         from tools.delegate_tool import delegate_task_background as _delegate_task_background
         result = _delegate_task_background(
@@ -9889,12 +9889,6 @@ class AIAgent:
             goal=function_args.get("goal"),
             context=function_args.get("context") or "",
         )
-        coder_run_id = result.get("coder_run_id") if isinstance(result, dict) else None
-        if coder_run_id and self.coder_spawn_callback is not None:
-            try:
-                self.coder_spawn_callback(coder_run_id, function_args.get("goal") or "")
-            except Exception as cb_err:
-                logging.debug(f"coder_spawn_callback error: {cb_err}")
         return json.dumps(result, ensure_ascii=False)
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,

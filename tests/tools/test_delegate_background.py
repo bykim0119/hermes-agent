@@ -587,3 +587,47 @@ def test_is_cancel_command_rejects_plain_words_and_followups():
     assert is_cancel_command("!cancel that") is False  # extra args, not a clean cancel
     assert is_cancel_command("") is False
     assert is_cancel_command(None) is False
+
+
+def test_delegate_task_background_fires_coder_spawn_callback():
+    """On a successful spawn the function itself fires parent_agent.coder_spawn_callback
+    so the platform adapter opens a UI surface (Discord thread) bound to coder_run_id.
+
+    This moves the callback firing out of run_agent's inline
+    _dispatch_delegate_task_background and into the function, so the registry
+    handler path (and any caller) gets the same behavior — letting us delete the
+    agent-loop elif (P1 plan Step 4.7).
+    """
+    parent = MagicMock()
+    parent.task_id = "parent-cb"
+
+    with patch("tools.delegate_tool._spawn_detached_coder"), \
+         patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
+        result = delegate_task_background(
+            parent_agent=parent,
+            goal="add hello to foo.py",
+            context="",
+        )
+
+    parent.coder_spawn_callback.assert_called_once()
+    call_str = str(parent.coder_spawn_callback.call_args)
+    assert result["coder_run_id"] in call_str
+    assert "add hello to foo.py" in call_str
+
+
+def test_delegate_task_background_callback_failure_is_swallowed():
+    """A throwing coder_spawn_callback must not break the spawn result."""
+    parent = MagicMock()
+    parent.task_id = "parent-cb2"
+    parent.coder_spawn_callback.side_effect = RuntimeError("ui down")
+
+    with patch("tools.delegate_tool._spawn_detached_coder"), \
+         patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
+        result = delegate_task_background(
+            parent_agent=parent,
+            goal="g",
+            context="",
+        )
+
+    assert result["status"] == "spawned"
+    assert result["coder_run_id"].startswith("coder-")
