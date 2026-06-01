@@ -4128,23 +4128,9 @@ _EXTERNAL_PROCESS_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "missing_cli_code": "missing_copilot_cli",
         "remote_base_url_prefix": "acp+tcp://",
     },
-    "codex-exec": {
-        "command_env_vars": ("HERMES_CODER_COMMAND",),
-        "default_command": "codex",
-        "args_env_var": "HERMES_CODER_ARGS",
-        "default_args": [
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "workspace-write",
-        ],
-        "missing_cli_hint": (
-            "Install OpenAI Codex CLI or set HERMES_CODER_COMMAND."
-        ),
-        "missing_cli_code": "missing_codex_cli",
-        "remote_base_url_prefix": None,
-    },
+    # codex-exec defaults are injected by the subagent_coder plugin's
+    # register(ctx) (plugins/subagent_coder/__init__.py) so all coder wiring
+    # lives in one place. Present only when that plugin is enabled.
 }
 
 

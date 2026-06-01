@@ -502,6 +502,10 @@ class TestResolveApiKeyProviderCredentials:
             lambda command: f"/usr/local/bin/{command}",
         )
 
+        # codex-exec defaults are now owned by the subagent_coder plugin
+        # (externalized from auth.py), so register them before resolving.
+        from plugins.subagent_coder import _register_external_process_defaults
+        _register_external_process_defaults()
         creds = resolve_external_process_provider_credentials("codex-exec")
 
         assert creds["provider"] == "codex-exec"
@@ -525,6 +529,8 @@ class TestResolveApiKeyProviderCredentials:
             lambda command: f"/usr/local/bin/{command}",
         )
 
+        from plugins.subagent_coder import _register_external_process_defaults
+        _register_external_process_defaults()
         creds = resolve_external_process_provider_credentials("codex-exec")
 
         # Default args must include --skip-git-repo-check (spike constraint #1)
