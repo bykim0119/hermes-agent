@@ -9,7 +9,8 @@ def test_returns_immediately_with_handle():
     parent = MagicMock()
     parent.task_id = "parent-task-1"
 
-    with patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn:
+    with patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn, \
+         patch("gateway.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
             goal="add function X to foo.py",
@@ -30,7 +31,8 @@ def test_records_coder_run_for_thread_routing():
     parent.task_id = "parent-task-2"
 
     with patch("tools.delegate_tool._spawn_detached_coder"), \
-         patch("tools.delegate_tool._register_coder_run") as mock_register:
+         patch("tools.delegate_tool._register_coder_run") as mock_register, \
+         patch("gateway.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
             goal="rename Y",
