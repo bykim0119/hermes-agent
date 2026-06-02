@@ -11,10 +11,22 @@ Wires (Task 2~8에서 차례로 채움):
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
+from typing import Callable, Optional
 
 from . import codex_provider
 
 logger = logging.getLogger(__name__)
+
+# Per-turn coder_spawn_callback, set by the GatewayRunner._run_agent wrap and
+# read by the AIAgent.run_conversation wrap to install it on the agent. Both
+# run on the gateway loop thread within one _run_agent coroutine, so the
+# ContextVar propagates (the agent object then carries the callback across the
+# thread boundary into tool execution). ``None`` outside a gateway turn (e.g.
+# CLI), so the run_conversation wrap is a no-op there.
+_coder_spawn_cb_ctx: ContextVar[Optional[Callable[[str, str], None]]] = ContextVar(
+    "coder_spawn_cb", default=None
+)
 
 
 def register(ctx) -> None:
@@ -33,11 +45,12 @@ def register(ctx) -> None:
     _install_coder_child_wraps()
     _install_codex_exec_client_factory_wrap()
     _install_coder_spawn_callback_slot()
+    _install_gateway_coder_spawn_wraps()
     # Task 6~7: auth resolver / Discord overlay.
     logger.info(
         "subagent_coder: register(ctx) complete "
         "(provider + defaults + delegate_background + dispatch/sequential/child/"
-        "client wraps + spawn-callback slot)"
+        "client/run_conversation wraps + spawn-callback slot + gateway spawn hook)"
     )
 
 
@@ -238,6 +251,126 @@ def _install_coder_spawn_callback_slot() -> None:
     if "coder_spawn_callback" not in vars(AIAgent):
         AIAgent.coder_spawn_callback = None
         logger.info("subagent_coder: AIAgent.coder_spawn_callback slot installed")
+
+
+def _build_coder_spawn_callback(runner, source, session_key, run_generation, loop):
+    """Build the per-turn coder_spawn_callback closure from gateway context.
+
+    Mirrors the stock gateway/run.py ``_coder_spawn`` exactly: when a coder is
+    spawned, open a platform UI surface (Discord thread) bound to coder_run_id
+    via ``run_coroutine_threadsafe`` on the captured loop. No-op when the active
+    adapter doesn't implement ``create_coder_thread`` or the run is stale.
+    """
+    import asyncio
+
+    status_adapter = runner.adapters.get(source.platform)
+    status_chat_id = source.chat_id
+    parent_thread_id = source.thread_id
+
+    def _run_still_current() -> bool:
+        if run_generation is None or not session_key:
+            return True
+        return runner._is_session_run_current(session_key, run_generation)
+
+    def _coder_spawn(coder_run_id: str, goal: str) -> None:
+        if not status_adapter or not _run_still_current():
+            return
+        if not hasattr(status_adapter, "create_coder_thread"):
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                status_adapter.create_coder_thread(
+                    coder_run_id=coder_run_id,
+                    goal=goal,
+                    chat_id=status_chat_id,
+                    parent_thread_id=parent_thread_id,
+                ),
+                loop,
+            )
+        except Exception as _e:
+            logger.debug("coder_spawn_callback error: %s", _e)
+
+    return _coder_spawn
+
+
+def _install_gateway_coder_spawn_wraps() -> None:
+    """Install coder_spawn_callback per-turn without editing gateway/run.py.
+
+    Two wraps cooperating via the _coder_spawn_cb_ctx ContextVar:
+      * GatewayRunner._run_agent (async, runs on the gateway loop thread): builds
+        the per-turn _coder_spawn closure from the turn's context (adapter, loop,
+        chat_id, thread_id, generation — all derivable from self + args) and sets
+        the ContextVar around the orig call.
+      * AIAgent.run_conversation: called synchronously inside _run_agent on the
+        same loop thread/context, so it reads the ContextVar and pins
+        ``self.coder_spawn_callback`` onto the (cached or fresh) agent. The attr
+        then crosses the thread boundary into tool execution where
+        delegate_task_background reads it.
+
+    GatewayRunner lives in gateway.run (gateway-only, heavy). We only wrap it when
+    that module is already imported — in gateway mode plugin discovery is first
+    triggered mid-turn (tools_config), long after gateway.run loads, so the guard
+    reliably finds it. In CLI mode gateway.run is absent and the run_conversation
+    wrap stays a harmless no-op (the ContextVar is never set).
+    """
+    import sys
+
+    from run_agent import AIAgent
+
+    # run_conversation wrap — always safe to install (run_agent is core).
+    if not getattr(AIAgent, "_subagent_coder_run_conversation_wrapped", False):
+        _orig_run_conversation = AIAgent.run_conversation
+
+        def _wrapped_run_conversation(self, *args, **kwargs):
+            cb = _coder_spawn_cb_ctx.get()
+            if cb is not None:
+                self.coder_spawn_callback = cb
+            return _orig_run_conversation(self, *args, **kwargs)
+
+        AIAgent.run_conversation = _wrapped_run_conversation
+        AIAgent._subagent_coder_run_conversation_wrapped = True
+        logger.info("subagent_coder: AIAgent.run_conversation wrapped for spawn-callback install")
+
+    # GatewayRunner._run_agent wrap — only in gateway mode.
+    gw = sys.modules.get("gateway.run")
+    GatewayRunner = getattr(gw, "GatewayRunner", None) if gw is not None else None
+    if GatewayRunner is None:
+        logger.debug("subagent_coder: gateway.run not loaded — skipping _run_agent wrap (CLI mode)")
+        return
+    if getattr(GatewayRunner, "_subagent_coder_run_agent_wrapped", False):
+        return
+
+    import asyncio
+    import inspect
+
+    _orig_run_agent = GatewayRunner._run_agent
+    _run_agent_sig = inspect.signature(_orig_run_agent)
+
+    async def _wrapped_run_agent(self, *args, **kwargs):
+        token = None
+        try:
+            bound = _run_agent_sig.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            source = bound.arguments.get("source")
+            session_key = bound.arguments.get("session_key")
+            run_generation = bound.arguments.get("run_generation")
+            if source is not None:
+                cb = _build_coder_spawn_callback(
+                    self, source, session_key, run_generation,
+                    asyncio.get_running_loop(),
+                )
+                token = _coder_spawn_cb_ctx.set(cb)
+        except Exception:
+            logger.debug("subagent_coder: failed to build coder_spawn_callback", exc_info=True)
+        try:
+            return await _orig_run_agent(self, *args, **kwargs)
+        finally:
+            if token is not None:
+                _coder_spawn_cb_ctx.reset(token)
+
+    GatewayRunner._run_agent = _wrapped_run_agent
+    GatewayRunner._subagent_coder_run_agent_wrapped = True
+    logger.info("subagent_coder: GatewayRunner._run_agent wrapped for coder_spawn_callback")
 
 
 def _register_external_process_defaults() -> None:
