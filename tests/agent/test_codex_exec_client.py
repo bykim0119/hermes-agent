@@ -332,7 +332,7 @@ def test_facade_attaches_its_client_when_subagent_id_given():
     should publish the wrapped client into the registry so
     ``cancel_coder_run`` finds it."""
     from unittest.mock import patch
-    from tools.delegate_tool import _CODER_RUN_REGISTRY, _register_coder_run
+    from plugins.subagent_coder.delegate_background import _CODER_RUN_REGISTRY, _register_coder_run
 
     coder_run_id = "coder-facade-attach"
     _register_coder_run(coder_run_id, "parent-X", "delegated goal")

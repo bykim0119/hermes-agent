@@ -25,9 +25,16 @@ def register(ctx) -> None:
     logger.info("subagent_coder: register(ctx) started")
     codex_provider.register_codex_provider(ctx)
     _register_external_process_defaults()
+    # Import the coder delegation module — this registers the
+    # delegate_task_background tool on the registry at import time.
+    from . import delegate_background  # noqa: F401
     _install_delegate_dispatch_wrap()
+    _install_coder_child_wraps()
     # Task 6~8: auth resolver / Discord overlay / coder_spawn_callback slot.
-    logger.info("subagent_coder: register(ctx) complete (provider + defaults + dispatch wrap)")
+    logger.info(
+        "subagent_coder: register(ctx) complete "
+        "(provider + defaults + delegate_background + dispatch/child wraps)"
+    )
 
 
 def _install_delegate_dispatch_wrap() -> None:
@@ -58,7 +65,7 @@ def _install_delegate_dispatch_wrap() -> None:
 
     def _wrapped_invoke_tool(self, function_name, function_args, *args, **kwargs):
         if function_name == "delegate_task_background":
-            from tools.delegate_tool import delegate_task_background
+            from plugins.subagent_coder.delegate_background import delegate_task_background
             return json.dumps(
                 delegate_task_background(
                     parent_agent=self,
@@ -72,6 +79,63 @@ def _install_delegate_dispatch_wrap() -> None:
     AIAgent._invoke_tool = _wrapped_invoke_tool
     AIAgent._subagent_coder_dispatch_wrapped = True
     logger.info("subagent_coder: AIAgent._invoke_tool wrapped for coder dispatch")
+
+
+def _install_coder_child_wraps() -> None:
+    """Runtime-wrap the stock child builders so the coder child gets its
+    codex-exec provider, chat_completions api_mode, and a ``_subagent_id``
+    pinned to ``coder_run_id`` — without editing tools/delegate_tool.py.
+
+    Stock ``delegate_task`` has no ``override_provider``/``subagent_id_override``
+    params, so the coder can't pass them. Instead ``_spawn_detached_coder`` sets
+    the ``_coder_child_ctx`` ContextVar and these two wraps read it:
+
+      * ``_build_child_agent``: PRE-inject ``override_provider``/``override_api_mode``
+        (codex-exec is process-backed and only does chat.completions — inheriting
+        the parent's codex_responses mode crashes the facade), then POST-pin
+        ``child._subagent_id`` so ``_run_single_child``/``interrupt_subagent``/
+        Discord routing all key off ``coder_run_id``.
+      * ``_build_child_progress_callback``: replace the internally generated
+        ``subagent_id`` with ``coder_run_id`` so every relayed event routes to
+        the matching Discord thread.
+
+    Both are module-level names in tools.delegate_tool, so the internal calls
+    inside ``_build_child_agent`` resolve to the wrapped versions at call time.
+    The coder spawn is single-task → ``_build_child_agent``, the callback, and
+    ``_run_single_child`` all run on the ``_runner`` thread inline, so the
+    ContextVar propagates (no ThreadPoolExecutor boundary).
+    """
+    import tools.delegate_tool as dt
+    from plugins.subagent_coder.delegate_background import _coder_child_ctx
+
+    if getattr(dt, "_subagent_coder_child_wrapped", False):
+        return
+
+    _orig_build_child_agent = dt._build_child_agent
+    _orig_build_progress_cb = dt._build_child_progress_callback
+
+    def _wrapped_build_child_agent(*args, **kwargs):
+        ctx = _coder_child_ctx.get()
+        if ctx is not None:
+            kwargs["override_provider"] = ctx["provider"]
+            kwargs["override_api_mode"] = ctx["api_mode"]
+        child = _orig_build_child_agent(*args, **kwargs)
+        if ctx is not None:
+            child._subagent_id = ctx["subagent_id"]
+        return child
+
+    def _wrapped_build_progress_cb(*args, **kwargs):
+        ctx = _coder_child_ctx.get()
+        if ctx is not None and "subagent_id" in kwargs:
+            kwargs["subagent_id"] = ctx["subagent_id"]
+        return _orig_build_progress_cb(*args, **kwargs)
+
+    dt._build_child_agent = _wrapped_build_child_agent
+    dt._build_child_progress_callback = _wrapped_build_progress_cb
+    dt._subagent_coder_child_wrapped = True
+    logger.info(
+        "subagent_coder: _build_child_agent / _build_child_progress_callback wrapped"
+    )
 
 
 def _register_external_process_defaults() -> None:

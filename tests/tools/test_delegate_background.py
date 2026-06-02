@@ -1,7 +1,7 @@
 """Tests for delegate_task_background — async/detached coder spawn (Task 3)."""
 from unittest.mock import MagicMock, patch
 
-from tools.delegate_tool import delegate_task_background
+from plugins.subagent_coder.delegate_background import delegate_task_background
 
 
 def test_returns_immediately_with_handle():
@@ -9,7 +9,7 @@ def test_returns_immediately_with_handle():
     parent = MagicMock()
     parent.task_id = "parent-task-1"
 
-    with patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn, \
+    with patch("plugins.subagent_coder.delegate_background._spawn_detached_coder") as mock_spawn, \
          patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
@@ -30,8 +30,8 @@ def test_records_coder_run_for_thread_routing():
     parent = MagicMock()
     parent.task_id = "parent-task-2"
 
-    with patch("tools.delegate_tool._spawn_detached_coder"), \
-         patch("tools.delegate_tool._register_coder_run") as mock_register, \
+    with patch("plugins.subagent_coder.delegate_background._spawn_detached_coder"), \
+         patch("plugins.subagent_coder.delegate_background._register_coder_run") as mock_register, \
          patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
@@ -58,7 +58,7 @@ def test_followup_argv_inserts_resume_with_session_id(monkeypatch):
     the conversation context carries over. Spawn itself is mocked so the test
     doesn't actually fork codex.
     """
-    from tools.delegate_tool import _spawn_followup_coder
+    from plugins.subagent_coder.delegate_background import _spawn_followup_coder
 
     captured = {}
 
@@ -74,7 +74,7 @@ def test_followup_argv_inserts_resume_with_session_id(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: ("codex", ["exec", "--json"]),
     )
     monkeypatch.setattr(
@@ -110,7 +110,7 @@ def test_followup_argv_translates_sandbox_danger(monkeypatch):
     The fix translates each ``--sandbox <mode>`` to the resume-compatible
     equivalent so the parent's effective sandbox mode is preserved.
     """
-    from tools.delegate_tool import _spawn_followup_coder
+    from plugins.subagent_coder.delegate_background import _spawn_followup_coder
 
     captured = {}
 
@@ -123,7 +123,7 @@ def test_followup_argv_translates_sandbox_danger(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: (
             "codex",
             [
@@ -155,7 +155,7 @@ def test_followup_argv_translates_sandbox_danger(monkeypatch):
 
 def test_followup_argv_translates_sandbox_workspace_write(monkeypatch):
     """``--sandbox workspace-write`` → ``--full-auto``."""
-    from tools.delegate_tool import _spawn_followup_coder
+    from plugins.subagent_coder.delegate_background import _spawn_followup_coder
 
     captured = {}
 
@@ -168,7 +168,7 @@ def test_followup_argv_translates_sandbox_workspace_write(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: (
             "codex",
             ["exec", "--json", "--sandbox", "workspace-write"],
@@ -200,7 +200,7 @@ def test_fresh_spawn_keeps_sandbox(monkeypatch):
     that resume sanitization (sandbox translation, profile dropping) only
     applies to resume.
     """
-    from tools.delegate_tool import _spawn_codex_coder
+    from plugins.subagent_coder.delegate_background import _spawn_codex_coder
 
     captured = {}
 
@@ -214,7 +214,7 @@ def test_fresh_spawn_keeps_sandbox(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: (
             "codex",
             [
@@ -248,7 +248,7 @@ def test_fresh_spawn_keeps_sandbox(monkeypatch):
 def test_fresh_spawn_prepends_exec_if_missing(monkeypatch):
     """Defensive: fresh spawn always starts with ``exec`` even if base args
     don't include it (config edge case)."""
-    from tools.delegate_tool import _spawn_codex_coder
+    from plugins.subagent_coder.delegate_background import _spawn_codex_coder
 
     captured = {}
 
@@ -261,7 +261,7 @@ def test_fresh_spawn_prepends_exec_if_missing(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: ("codex", ["--json"]),
     )
     monkeypatch.setattr(
@@ -279,7 +279,7 @@ def test_fresh_spawn_prepends_exec_if_missing(monkeypatch):
 def test_followup_argv_drops_profile_pair(monkeypatch):
     """``--profile NAME`` is rejected by resume; drop the pair (parent already
     used it to seed config)."""
-    from tools.delegate_tool import _spawn_followup_coder
+    from plugins.subagent_coder.delegate_background import _spawn_followup_coder
 
     captured = {}
 
@@ -292,7 +292,7 @@ def test_followup_argv_drops_profile_pair(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: ("codex", ["exec", "--json", "--profile", "myprof"]),
     )
     monkeypatch.setattr(
@@ -315,7 +315,7 @@ def test_followup_argv_drops_profile_pair(monkeypatch):
 
 def test_followup_argv_handles_args_without_exec(monkeypatch):
     """Defensive: if base args don't start with 'exec', prepend it."""
-    from tools.delegate_tool import _spawn_followup_coder
+    from plugins.subagent_coder.delegate_background import _spawn_followup_coder
 
     captured = {}
 
@@ -328,7 +328,7 @@ def test_followup_argv_handles_args_without_exec(monkeypatch):
                 yield
 
     monkeypatch.setattr(
-        "tools.delegate_tool._resolve_codex_command_and_args",
+        "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
         lambda: ("codex", ["--json"]),  # missing the leading "exec"
     )
     monkeypatch.setattr(
@@ -361,7 +361,7 @@ def test_cancel_unknown_run_returns_false():
     cancel surface is safe to call from message handlers without prior
     existence checks, which keeps the Discord adapter code dumber.
     """
-    from tools.delegate_tool import _CODER_RUN_REGISTRY, cancel_coder_run
+    from plugins.subagent_coder.delegate_background import _CODER_RUN_REGISTRY, cancel_coder_run
 
     assert "coder-does-not-exist" not in _CODER_RUN_REGISTRY
     assert cancel_coder_run("coder-does-not-exist") is False
@@ -377,7 +377,7 @@ def test_cancel_terminates_attached_client_and_marks_status():
     Status change is what surfaces "this run is dead" to other gateway
     code (e.g. the event bus, which could otherwise keep flushing
     debounced events to a closed thread)."""
-    from tools.delegate_tool import (
+    from plugins.subagent_coder.delegate_background import (
         _CODER_RUN_REGISTRY,
         _attach_coder_client,
         _register_coder_run,
@@ -392,7 +392,7 @@ def test_cancel_terminates_attached_client_and_marks_status():
     _attach_coder_client(coder_run_id, fake_client)
 
     try:
-        with patch("tools.delegate_tool.interrupt_subagent", return_value=False):
+        with patch("plugins.subagent_coder.delegate_background.interrupt_subagent", return_value=False):
             ok = cancel_coder_run(coder_run_id)
 
         assert ok is True
@@ -408,7 +408,7 @@ def test_cancel_falls_back_to_interrupt_subagent_when_no_client():
     exists but ``client`` not set). In that case we still want cancel to
     take effect via ``interrupt_subagent`` — its parent AIAgent shell
     will tear the in-flight chat completion down."""
-    from tools.delegate_tool import (
+    from plugins.subagent_coder.delegate_background import (
         _CODER_RUN_REGISTRY,
         _register_coder_run,
         cancel_coder_run,
@@ -419,7 +419,7 @@ def test_cancel_falls_back_to_interrupt_subagent_when_no_client():
     assert _CODER_RUN_REGISTRY[coder_run_id].get("client") is None
 
     try:
-        with patch("tools.delegate_tool.interrupt_subagent", return_value=True):
+        with patch("plugins.subagent_coder.delegate_background.interrupt_subagent", return_value=True):
             ok = cancel_coder_run(coder_run_id)
         assert ok is True
         assert _CODER_RUN_REGISTRY[coder_run_id]["status"] == "cancelled"
@@ -434,7 +434,7 @@ def test_spawn_codex_coder_attaches_client_to_registry():
 
     Mocks CodexExecClient so the test doesn't actually fork codex; we
     just need to observe that the client instance becomes reachable."""
-    from tools.delegate_tool import (
+    from plugins.subagent_coder.delegate_background import (
         _CODER_RUN_REGISTRY,
         _register_coder_run,
         _spawn_codex_coder,
@@ -458,7 +458,7 @@ def test_spawn_codex_coder_attaches_client_to_registry():
     try:
         with patch("plugins.subagent_coder.codex_exec_client.CodexExecClient", _FakeClient), \
              patch(
-                 "tools.delegate_tool._resolve_codex_command_and_args",
+                 "plugins.subagent_coder.delegate_background._resolve_codex_command_and_args",
                  return_value=("codex", ["exec", "--json"]),
              ):
             _spawn_codex_coder(coder_run_id, "hello")
@@ -476,7 +476,7 @@ def test_is_cancel_command_recognizes_bang_prefixed_tokens():
     natural follow-up messages that happen to contain the word ``cancel``
     (e.g. "cancel that approach and try again") still flow to codex as
     real instructions."""
-    from tools.delegate_tool import is_cancel_command
+    from plugins.subagent_coder.delegate_background import is_cancel_command
 
     assert is_cancel_command("!cancel") is True
     assert is_cancel_command("!stop") is True
@@ -490,7 +490,7 @@ def test_delegate_task_background_short_circuits_on_bad_auth():
     the user would see an opaque ``returncode=N`` inside their thread
     instead of "your token is expired, run `codex login`".
     """
-    from tools.delegate_tool import delegate_task_background
+    from plugins.subagent_coder.delegate_background import delegate_task_background
 
     parent = MagicMock()
     parent.task_id = "parent-auth"
@@ -498,7 +498,7 @@ def test_delegate_task_background_short_circuits_on_bad_auth():
     with patch(
         "plugins.subagent_coder.coder_config.check_codex_auth",
         return_value="Codex OAuth 만료 — `codex login` 재실행 필요",
-    ), patch("tools.delegate_tool._spawn_detached_coder") as mock_spawn:
+    ), patch("plugins.subagent_coder.delegate_background._spawn_detached_coder") as mock_spawn:
         result = delegate_task_background(
             parent_agent=parent,
             goal="rename Y",
@@ -520,7 +520,7 @@ def test_resolve_codex_command_falls_back_to_config_when_env_unset(monkeypatch):
     see codex spawn with ``workspace-write`` (the default) because the
     old behavior dropped straight from "no env" to "default", skipping
     config entirely."""
-    from tools.delegate_tool import _resolve_codex_command_and_args
+    from plugins.subagent_coder.delegate_background import _resolve_codex_command_and_args
 
     monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_CODER_ARGS", raising=False)
@@ -550,7 +550,7 @@ def test_resolve_codex_command_config_overrides_auth_resolver_args(monkeypatch):
 
     Priority: env > delegation.coder.args (config) > auth resolver creds > hardcoded default.
     """
-    from tools.delegate_tool import _resolve_codex_command_and_args
+    from plugins.subagent_coder.delegate_background import _resolve_codex_command_and_args
 
     monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_CODER_ARGS", raising=False)
@@ -579,7 +579,7 @@ def test_resolve_codex_command_config_overrides_auth_resolver_args(monkeypatch):
 def test_is_cancel_command_rejects_plain_words_and_followups():
     """Words without the bang prefix must NOT trigger cancellation —
     those are valid follow-up instructions to codex."""
-    from tools.delegate_tool import is_cancel_command
+    from plugins.subagent_coder.delegate_background import is_cancel_command
 
     assert is_cancel_command("cancel") is False
     assert is_cancel_command("stop") is False
@@ -601,7 +601,7 @@ def test_delegate_task_background_fires_coder_spawn_callback():
     parent = MagicMock()
     parent.task_id = "parent-cb"
 
-    with patch("tools.delegate_tool._spawn_detached_coder"), \
+    with patch("plugins.subagent_coder.delegate_background._spawn_detached_coder"), \
          patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,
@@ -621,7 +621,7 @@ def test_delegate_task_background_callback_failure_is_swallowed():
     parent.task_id = "parent-cb2"
     parent.coder_spawn_callback.side_effect = RuntimeError("ui down")
 
-    with patch("tools.delegate_tool._spawn_detached_coder"), \
+    with patch("plugins.subagent_coder.delegate_background._spawn_detached_coder"), \
          patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = delegate_task_background(
             parent_agent=parent,

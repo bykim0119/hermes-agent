@@ -9883,7 +9883,7 @@ class AIAgent:
         ``self`` here. coder_spawn_callback (Discord thread opening) is fired
         inside delegate_task_background itself, so any caller gets it.
         """
-        from tools.delegate_tool import delegate_task_background as _delegate_task_background
+        from plugins.subagent_coder.delegate_background import delegate_task_background as _delegate_task_background
         result = _delegate_task_background(
             parent_agent=self,
             goal=function_args.get("goal"),

@@ -855,7 +855,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         str(message.channel.id)
                     )
                     if _cid:
-                        from tools.delegate_tool import is_cancel_command
+                        from plugins.subagent_coder.delegate_background import is_cancel_command
                         if is_cancel_command(message.content):
                             await adapter_self._cancel_coder_run(_cid, message.channel)
                             return
@@ -3909,7 +3909,7 @@ class DiscordAdapter(BasePlatformAdapter):
         parent_task_id = f"slash:/code:{interaction.user.id}"
 
         try:
-            from tools.delegate_tool import _register_coder_run, _spawn_codex_coder
+            from plugins.subagent_coder.delegate_background import _register_coder_run, _spawn_codex_coder
         except Exception as exc:
             logger.exception("[%s] /code import failed: %s", self.name, exc)
             await interaction.followup.send(f"❌ /code import 실패: {exc}", ephemeral=True)
@@ -3975,7 +3975,7 @@ class DiscordAdapter(BasePlatformAdapter):
         captured progress, which is usually why they cancelled.
         """
         try:
-            from tools.delegate_tool import cancel_coder_run
+            from plugins.subagent_coder.delegate_background import cancel_coder_run
         except Exception as exc:
             logger.exception(
                 "[%s] cancel import failed for %s: %s",
@@ -4042,7 +4042,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return
 
         try:
-            from tools.delegate_tool import _spawn_followup_coder
+            from plugins.subagent_coder.delegate_background import _spawn_followup_coder
 
             _spawn_followup_coder(
                 coder_run_id=coder_run_id,

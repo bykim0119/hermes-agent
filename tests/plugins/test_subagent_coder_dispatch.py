@@ -18,7 +18,7 @@ def test_register_wraps_invoke_tool_and_injects_parent_agent():
         "register가 _invoke_tool을 wrap하지 않음"
 
     agent = MagicMock()  # 현재 실행 중인 AIAgent 역할
-    with patch("tools.delegate_tool._spawn_detached_coder"), \
+    with patch("plugins.subagent_coder.delegate_background._spawn_detached_coder"), \
          patch("plugins.subagent_coder.coder_config.check_codex_auth", return_value=None):
         result = json.loads(
             AIAgent._invoke_tool(agent, "delegate_task_background", {"goal": "g"})
