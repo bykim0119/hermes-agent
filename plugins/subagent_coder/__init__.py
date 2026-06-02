@@ -29,11 +29,15 @@ def register(ctx) -> None:
     # delegate_task_background tool on the registry at import time.
     from . import delegate_background  # noqa: F401
     _install_delegate_dispatch_wrap()
+    _install_sequential_dispatch_wrap()
     _install_coder_child_wraps()
-    # Task 6~8: auth resolver / Discord overlay / coder_spawn_callback slot.
+    _install_codex_exec_client_factory_wrap()
+    _install_coder_spawn_callback_slot()
+    # Task 6~7: auth resolver / Discord overlay.
     logger.info(
         "subagent_coder: register(ctx) complete "
-        "(provider + defaults + delegate_background + dispatch/child wraps)"
+        "(provider + defaults + delegate_background + dispatch/sequential/child/"
+        "client wraps + spawn-callback slot)"
     )
 
 
@@ -136,6 +140,104 @@ def _install_coder_child_wraps() -> None:
     logger.info(
         "subagent_coder: _build_child_agent / _build_child_progress_callback wrapped"
     )
+
+
+def _install_sequential_dispatch_wrap() -> None:
+    """Runtime-wrap AIAgent._execute_tool_calls_sequential to expose ``self``
+    to the coder's registry handler on the sequential dispatch path.
+
+    The concurrent path goes through ``_invoke_tool`` (wrapped separately, which
+    injects parent_agent=self directly). The sequential path inlines tool
+    dispatch and routes unknown registry tools to ``handle_function_call`` ->
+    ``registry.dispatch`` -> handler, which never receives parent_agent. So we
+    set the ``_dispatch_parent_agent`` ContextVar to ``self`` around the loop;
+    the delegate_task_background handler reads it as a fallback. Single tool
+    calls (the typical coder spawn) use this sequential path, so this wrap is
+    what makes coder delegation work off the stock run_agent.py.
+    """
+    from run_agent import AIAgent
+    from plugins.subagent_coder.delegate_background import _dispatch_parent_agent
+
+    if getattr(AIAgent, "_subagent_coder_sequential_wrapped", False):
+        return
+
+    _orig_sequential = AIAgent._execute_tool_calls_sequential
+
+    def _wrapped_sequential(self, *args, **kwargs):
+        token = _dispatch_parent_agent.set(self)
+        try:
+            return _orig_sequential(self, *args, **kwargs)
+        finally:
+            _dispatch_parent_agent.reset(token)
+
+    AIAgent._execute_tool_calls_sequential = _wrapped_sequential
+    AIAgent._subagent_coder_sequential_wrapped = True
+    logger.info("subagent_coder: AIAgent._execute_tool_calls_sequential wrapped")
+
+
+def _install_codex_exec_client_factory_wrap() -> None:
+    """Runtime-wrap AIAgent._create_openai_client so codex-exec agents get a
+    CodexExecFacade instead of an HTTP client.
+
+    codex-exec is process-backed — ``base_url`` (``codex-exec://local``) is a
+    marker, not an endpoint. The facade makes ``chat.completions.create()``
+    spawn ``codex exec --json``. Mirrors the stock copilot-acp branch in
+    ``_create_openai_client``; lifting it into the plugin keeps run_agent.py
+    diff-free.
+    """
+    from run_agent import AIAgent
+
+    if getattr(AIAgent, "_subagent_coder_client_factory_wrapped", False):
+        return
+
+    _orig_create_client = AIAgent._create_openai_client
+
+    def _wrapped_create_client(self, client_kwargs, *, reason, shared):
+        if self.provider == "codex-exec" or str(
+            client_kwargs.get("base_url", "")
+        ).startswith("codex-exec://"):
+            from plugins.subagent_coder.codex_exec_client import CodexExecFacade
+            try:
+                from hermes_cli.auth import resolve_external_process_provider_credentials
+                _creds = resolve_external_process_provider_credentials("codex-exec")
+            except Exception as _e:
+                logger.warning("codex-exec credential resolution failed: %s", _e)
+                _creds = {}
+            client = CodexExecFacade(
+                api_key=client_kwargs.get("api_key"),
+                base_url=client_kwargs.get("base_url"),
+                command=_creds.get("command"),
+                args=_creds.get("args") or [],
+                subagent_id=getattr(self, "_subagent_id", None),
+            )
+            logger.info(
+                "Codex-exec facade created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
+        return _orig_create_client(self, client_kwargs, reason=reason, shared=shared)
+
+    AIAgent._create_openai_client = _wrapped_create_client
+    AIAgent._subagent_coder_client_factory_wrapped = True
+    logger.info("subagent_coder: AIAgent._create_openai_client wrapped for codex-exec")
+
+
+def _install_coder_spawn_callback_slot() -> None:
+    """Provide a class-level ``coder_spawn_callback`` default on AIAgent.
+
+    Stock run_agent.py no longer initializes the per-instance slot. gateway/run.py
+    sets it per-turn (instance attr) and delegate_task_background reads it via
+    ``getattr(parent_agent, "coder_spawn_callback", None)``. The class default
+    keeps the attribute introspectable and the getattr cheap. Signature:
+    ``(coder_run_id: str, goal: str) -> None``.
+    """
+    from run_agent import AIAgent
+
+    if "coder_spawn_callback" not in vars(AIAgent):
+        AIAgent.coder_spawn_callback = None
+        logger.info("subagent_coder: AIAgent.coder_spawn_callback slot installed")
 
 
 def _register_external_process_defaults() -> None:

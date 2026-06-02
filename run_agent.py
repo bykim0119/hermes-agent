@@ -51,7 +51,7 @@ import threading
 from types import SimpleNamespace
 import urllib.request
 import uuid
-from typing import Callable, List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, urlunparse
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # SDK pulls ~240 ms of imports. We expose `OpenAI` as a thin proxy object
@@ -1264,10 +1264,8 @@ class AIAgent:
             api_mode is None
             and self.api_mode == "chat_completions"
             and self.provider != "copilot-acp"
-            and self.provider != "codex-exec"
             and not str(self.base_url or "").lower().startswith("acp://copilot")
             and not str(self.base_url or "").lower().startswith("acp+tcp://")
-            and not str(self.base_url or "").lower().startswith("codex-exec://")
             and not self._is_azure_openai_url()
             and (
                 self._is_direct_openai_url()
@@ -1302,11 +1300,6 @@ class AIAgent:
         self.tool_progress_callback = tool_progress_callback
         self.tool_start_callback = tool_start_callback
         self.tool_complete_callback = tool_complete_callback
-        # Optional callback fired by _dispatch_delegate_task_background when a
-        # coder sub-agent is spawned. Set by gateway/run.py per-turn so the
-        # active platform adapter (e.g. Discord) can open a dedicated thread
-        # bound to coder_run_id. Signature: (coder_run_id: str, goal: str).
-        self.coder_spawn_callback: Optional[Callable[[str, str], None]] = None
         self.suppress_status_output = False
         self.thinking_callback = thinking_callback
         self.reasoning_callback = reasoning_callback
@@ -5966,35 +5959,6 @@ class AIAgent:
                 self._client_log_context(),
             )
             return client
-        if self.provider == "codex-exec" or str(client_kwargs.get("base_url", "")).startswith("codex-exec://"):
-            # codex-exec is process-backed — the base_url is a marker, not an
-            # HTTP endpoint. Return the CodexExecFacade directly so
-            # chat.completions.create() spawns ``codex exec --json`` instead of
-            # POSTing to "codex-exec://local/chat/completions". Resolve
-            # command/args from the same env-var path auxiliary_client uses
-            # since client_kwargs has already been stripped down to api_key +
-            # base_url by the time we get here.
-            from plugins.subagent_coder.codex_exec_client import CodexExecFacade
-            try:
-                from hermes_cli.auth import resolve_external_process_provider_credentials
-                _creds = resolve_external_process_provider_credentials("codex-exec")
-            except Exception as _e:
-                logger.warning("codex-exec credential resolution failed: %s", _e)
-                _creds = {}
-            client = CodexExecFacade(
-                api_key=client_kwargs.get("api_key"),
-                base_url=client_kwargs.get("base_url"),
-                command=_creds.get("command"),
-                args=_creds.get("args") or [],
-                subagent_id=getattr(self, "_subagent_id", None),
-            )
-            logger.info(
-                "Codex-exec facade created (%s, shared=%s) %s",
-                reason,
-                shared,
-                self._client_log_context(),
-            )
-            return client
         if self.provider == "google-gemini-cli" or str(client_kwargs.get("base_url", "")).startswith("cloudcode-pa://"):
             from agent.gemini_cloudcode_adapter import GeminiCloudCodeClient
 
@@ -9874,23 +9838,6 @@ class AIAgent:
             parent_agent=self,
         )
 
-    def _dispatch_delegate_task_background(self, function_args: dict) -> str:
-        """Thin parent_agent-injecting site for delegate_task_background.
-
-        Mirrors _dispatch_delegate_task. Required because the registry dispatch
-        path (model_tools.handle_function_call -> registry.dispatch) does NOT
-        forward parent_agent to handlers — so coder delegation must inject
-        ``self`` here. coder_spawn_callback (Discord thread opening) is fired
-        inside delegate_task_background itself, so any caller gets it.
-        """
-        from plugins.subagent_coder.delegate_background import delegate_task_background as _delegate_task_background
-        result = _delegate_task_background(
-            parent_agent=self,
-            goal=function_args.get("goal"),
-            context=function_args.get("context") or "",
-        )
-        return json.dumps(result, ensure_ascii=False)
-
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
                      pre_tool_block_checked: bool = False) -> str:
@@ -9967,8 +9914,6 @@ class AIAgent:
             )
         elif function_name == "delegate_task":
             return self._dispatch_delegate_task(function_args)
-        elif function_name == "delegate_task_background":
-            return self._dispatch_delegate_task_background(function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -10622,16 +10567,6 @@ class AIAgent:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
                         self._vprint(f"  {cute_msg}")
-            elif function_name == "delegate_task_background":
-                # Returns immediately after spawning the detached coder, so no
-                # spinner — just dispatch and emit a one-line cute message.
-                function_result = self._dispatch_delegate_task_background(function_args)
-                tool_duration = time.time() - tool_start_time
-                if self._should_emit_quiet_tool_messages():
-                    cute_msg = _get_cute_tool_message_impl(
-                        'delegate_task_background', function_args, tool_duration, result=function_result
-                    )
-                    self._vprint(f"  {cute_msg}")
             elif self._context_engine_tool_names and function_name in self._context_engine_tool_names:
                 # Context engine tools (lcm_grep, lcm_describe, lcm_expand, etc.)
                 spinner = None

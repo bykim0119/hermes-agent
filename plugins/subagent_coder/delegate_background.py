@@ -41,6 +41,19 @@ _coder_child_ctx: ContextVar[Optional[dict]] = ContextVar(
     "coder_child_ctx", default=None
 )
 
+# Carries the running AIAgent into the registry handler on the SEQUENTIAL tool
+# dispatch path. ``registry.dispatch`` never forwards parent_agent, and the
+# sequential loop (``_execute_tool_calls_sequential``) routes unknown registry
+# tools straight to ``handle_function_call`` — so the wrap installed in
+# ``subagent_coder.register(ctx)`` sets this ContextVar to ``self`` around the
+# loop and the handler below reads it as a fallback. The sequential loop runs
+# on the agent's own thread (no ThreadPoolExecutor), so the ContextVar
+# propagates. The concurrent path injects parent_agent directly via the
+# ``_invoke_tool`` wrap instead (ContextVars don't cross worker threads).
+_dispatch_parent_agent: ContextVar[Optional[Any]] = ContextVar(
+    "dispatch_parent_agent", default=None
+)
+
 
 # ---------------------------------------------------------------------------
 # Background variant — spawns coder child detached, returns immediately
@@ -465,7 +478,11 @@ registry.register(
     schema=DELEGATE_TASK_BACKGROUND_SCHEMA,
     handler=lambda args, **kw: json.dumps(
         delegate_task_background(
-            parent_agent=kw.get("parent_agent"),
+            # Sequential path: registry.dispatch passes no parent_agent, so fall
+            # back to the ContextVar set by the _execute_tool_calls_sequential
+            # wrap. Concurrent path bypasses this handler (the _invoke_tool wrap
+            # injects parent_agent=self directly).
+            parent_agent=kw.get("parent_agent") or _dispatch_parent_agent.get(),
             goal=args.get("goal"),
             context=args.get("context") or "",
         ),
