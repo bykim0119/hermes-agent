@@ -37,6 +37,7 @@ def register(ctx) -> None:
     logger.info("subagent_coder: register(ctx) started")
     codex_provider.register_codex_provider(ctx)
     _install_codex_exec_auth()
+    _install_codex_exec_aux_client_wrap()
     # Import the coder delegation module — this registers the
     # delegate_task_background tool on the registry at import time.
     from . import delegate_background  # noqa: F401
@@ -493,3 +494,92 @@ def _install_codex_exec_auth() -> None:
     auth.resolve_external_process_provider_credentials = _wrapped_resolve
     auth._subagent_coder_resolver_wrapped = True
     logger.info("subagent_coder: codex-exec registered + resolve_external_process wrapped")
+
+
+def _install_codex_exec_aux_client_wrap() -> None:
+    """Teach agent.auxiliary_client.resolve_provider_client about codex-exec.
+
+    Stock resolve_provider_client handles copilot-acp under external_process and
+    falls through to "not directly supported" for codex-exec. We wrap it so a
+    codex-exec request builds a CodexExecFacade (mirroring the stock copilot-acp
+    branch), leaving every other provider to stock. Callers import the function
+    lazily, so they pick up the wrapped version.
+    """
+    from agent import auxiliary_client as aux
+
+    if getattr(aux, "_subagent_coder_aux_client_wrapped", False):
+        return
+
+    _orig_resolve_provider_client = aux.resolve_provider_client
+
+    def _wrapped_resolve_provider_client(provider, *args, **kwargs):
+        if provider == "codex-exec":
+            return _resolve_codex_exec_aux_client(provider, *args, **kwargs)
+        return _orig_resolve_provider_client(provider, *args, **kwargs)
+
+    aux.resolve_provider_client = _wrapped_resolve_provider_client
+    aux._subagent_coder_aux_client_wrapped = True
+    logger.info("subagent_coder: auxiliary_client.resolve_provider_client wrapped for codex-exec")
+
+
+def _resolve_codex_exec_aux_client(
+    provider,
+    model=None,
+    async_mode=False,
+    raw_codex=False,
+    explicit_base_url=None,
+    explicit_api_key=None,
+    api_mode=None,
+    main_runtime=None,
+    is_vision=False,
+):
+    """codex-exec branch of resolve_provider_client, lifted into the plugin.
+
+    Mirrors the stock external_process flow: resolve creds, normalize the model,
+    validate, build the CodexExecFacade, async-wrap if requested.
+    """
+    from hermes_cli.auth import resolve_external_process_provider_credentials
+    from agent.auxiliary_client import (
+        _normalize_resolved_model,
+        _read_main_model,
+        _to_async_client,
+    )
+
+    creds = resolve_external_process_provider_credentials(provider)
+    final_model = _normalize_resolved_model(
+        model
+        or (main_runtime.get("model") if main_runtime else None)
+        or _read_main_model(),
+        provider,
+    )
+    api_key = str(creds.get("api_key", "")).strip()
+    base_url = str(creds.get("base_url", "")).strip()
+    command = str(creds.get("command", "")).strip() or None
+    cmd_args = list(creds.get("args") or [])
+    if not final_model:
+        logger.warning(
+            "resolve_provider_client: codex-exec requested but no model "
+            "was provided or configured"
+        )
+        return None, None
+    if not api_key or not base_url:
+        logger.warning(
+            "resolve_provider_client: codex-exec requested but external "
+            "process credentials are incomplete"
+        )
+        return None, None
+
+    from plugins.subagent_coder.codex_exec_client import CodexExecFacade
+
+    client = CodexExecFacade(
+        api_key=api_key,
+        base_url=base_url,
+        command=command,
+        args=cmd_args,
+    )
+    logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
+    return (
+        _to_async_client(client, final_model, is_vision=is_vision)
+        if async_mode
+        else (client, final_model)
+    )
