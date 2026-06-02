@@ -216,6 +216,11 @@ def test_auxiliary_client_resolves_codex_exec_to_facade(monkeypatch):
     """resolve_provider_client(provider='codex-exec') returns CodexExecFacade."""
     from agent import auxiliary_client
 
+    # codex-exec is now registered in PROVIDER_REGISTRY by the plugin, not
+    # statically in auth.py — install it so resolve_provider_client recognizes it.
+    from plugins.subagent_coder import _install_codex_exec_auth
+    _install_codex_exec_auth()
+
     fake_creds = {
         "provider": "codex-exec",
         "api_key": "codex-exec",

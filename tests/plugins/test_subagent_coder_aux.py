@@ -1,28 +1,65 @@
-"""subagent_coder.register(ctx)가 codex-exec를 _EXTERNAL_PROCESS_DEFAULTS에
-주입해야 한다.
+"""subagent_coder.register(ctx)가 codex-exec를 hermes_cli.auth에 등록해야 한다.
 
-실제 정의 위치는 hermes_cli.auth._EXTERNAL_PROCESS_DEFAULTS (plan이 적은
-agent.auxiliary_client가 아님). codex-exec 항목은 더 이상 auth.py에 하드코드되지
-않고 plugin register 시점에 .update로 들어온다 — 코더 wiring을 한 plugin으로
-모으는 P1 원칙과 일관 (provider 등록과 동일).
+stock auth.py는 codex-exec를 모르고 resolve_external_process_provider_credentials는
+copilot-acp 전용 하드코드다. register(ctx)는 (1) PROVIDER_REGISTRY에 codex-exec
+ProviderConfig를 추가하고 (2) resolver를 wrap해 codex-exec를 plugin이 해석하게
+한다 — 코더 wiring을 한 plugin으로 모으는 P1 원칙과 일관 (auth.py 흔적 0).
 """
 from unittest.mock import MagicMock
 
 
-def test_codex_exec_in_external_process_defaults_after_register():
-    from hermes_cli.auth import _EXTERNAL_PROCESS_DEFAULTS
+def test_codex_exec_registered_after_register():
+    import hermes_cli.auth as auth
 
-    # 격리: 다른 import로 이미 있을 수 있으니 제거 후 register만으로 복원되는지
-    _EXTERNAL_PROCESS_DEFAULTS.pop("codex-exec", None)
+    # 격리: 이전 테스트가 이미 등록했을 수 있으니 register만으로 복원되는지
+    auth.PROVIDER_REGISTRY.pop("codex-exec", None)
 
     from plugins.subagent_coder import register
 
     register(MagicMock())
 
-    assert "codex-exec" in _EXTERNAL_PROCESS_DEFAULTS, \
-        "register(ctx)가 codex-exec를 _EXTERNAL_PROCESS_DEFAULTS에 주입하지 않음"
-    entry = _EXTERNAL_PROCESS_DEFAULTS["codex-exec"]
-    assert entry.get("default_command") == "codex"
-    assert isinstance(entry.get("default_args"), list)
-    assert "exec" in entry["default_args"]
-    assert entry.get("args_env_var") == "HERMES_CODER_ARGS"
+    assert "codex-exec" in auth.PROVIDER_REGISTRY, \
+        "register(ctx)가 codex-exec를 PROVIDER_REGISTRY에 추가하지 않음"
+    pconfig = auth.PROVIDER_REGISTRY["codex-exec"]
+    assert pconfig.auth_type == "external_process"
+    assert pconfig.inference_base_url == "codex-exec://local"
+    assert getattr(auth, "_subagent_coder_resolver_wrapped", False), \
+        "resolve_external_process_provider_credentials가 wrap되지 않음"
+
+
+def test_resolve_codex_exec_via_wrap(monkeypatch):
+    """wrap된 resolver가 codex-exec creds를 올바르게 반환."""
+    import hermes_cli.auth as auth
+    from plugins.subagent_coder import _install_codex_exec_auth
+
+    monkeypatch.delenv("HERMES_CODER_COMMAND", raising=False)
+    monkeypatch.delenv("HERMES_CODER_ARGS", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}"
+    )
+    _install_codex_exec_auth()
+
+    creds = auth.resolve_external_process_provider_credentials("codex-exec")
+    assert creds["provider"] == "codex-exec"
+    assert creds["api_key"] == "codex-exec"
+    assert creds["base_url"] == "codex-exec://local"
+    assert creds["command"] == "/usr/local/bin/codex"
+    assert "--skip-git-repo-check" in creds["args"]
+    assert creds["source"] == "process"
+
+
+def test_copilot_acp_still_falls_through_to_stock(monkeypatch):
+    """비-codex 외부프로세스 provider는 stock resolver로 위임."""
+    import hermes_cli.auth as auth
+    from plugins.subagent_coder import _install_codex_exec_auth
+
+    monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "--acp --stdio")
+    monkeypatch.setattr(
+        "hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}"
+    )
+    _install_codex_exec_auth()
+
+    creds = auth.resolve_external_process_provider_credentials("copilot-acp")
+    assert creds["provider"] == "copilot-acp"
+    assert creds["api_key"] == "copilot-acp"
+    assert creds["command"] == "/usr/local/bin/copilot"

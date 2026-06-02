@@ -502,11 +502,13 @@ class TestResolveApiKeyProviderCredentials:
             lambda command: f"/usr/local/bin/{command}",
         )
 
-        # codex-exec defaults are now owned by the subagent_coder plugin
-        # (externalized from auth.py), so register them before resolving.
-        from plugins.subagent_coder import _register_external_process_defaults
-        _register_external_process_defaults()
-        creds = resolve_external_process_provider_credentials("codex-exec")
+        # codex-exec resolution is now owned by the subagent_coder plugin
+        # (stock auth.py only knows copilot-acp). register installs a wrap on
+        # the module attr, so call it via the module (not the top-level import).
+        from plugins.subagent_coder import _install_codex_exec_auth
+        _install_codex_exec_auth()
+        import hermes_cli.auth as _auth
+        creds = _auth.resolve_external_process_provider_credentials("codex-exec")
 
         assert creds["provider"] == "codex-exec"
         assert creds["api_key"] == "codex-exec"
@@ -529,9 +531,10 @@ class TestResolveApiKeyProviderCredentials:
             lambda command: f"/usr/local/bin/{command}",
         )
 
-        from plugins.subagent_coder import _register_external_process_defaults
-        _register_external_process_defaults()
-        creds = resolve_external_process_provider_credentials("codex-exec")
+        from plugins.subagent_coder import _install_codex_exec_auth
+        _install_codex_exec_auth()
+        import hermes_cli.auth as _auth
+        creds = _auth.resolve_external_process_provider_credentials("codex-exec")
 
         # Default args must include --skip-git-repo-check (spike constraint #1)
         # and --sandbox workspace-write (spike constraint #2).

@@ -36,7 +36,7 @@ def register(ctx) -> None:
     """
     logger.info("subagent_coder: register(ctx) started")
     codex_provider.register_codex_provider(ctx)
-    _register_external_process_defaults()
+    _install_codex_exec_auth()
     # Import the coder delegation module — this registers the
     # delegate_task_background tool on the registry at import time.
     from . import delegate_background  # noqa: F401
@@ -409,28 +409,87 @@ def _install_coder_toolset_membership() -> None:
     logger.info("subagent_coder: delegate_task_background added to delegation toolsets")
 
 
-def _register_external_process_defaults() -> None:
-    """Inject codex-exec into hermes_cli.auth._EXTERNAL_PROCESS_DEFAULTS.
+_CODEX_EXEC_BASE_URL = "codex-exec://local"
+_CODEX_EXEC_DEFAULT_ARGS = [
+    "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write",
+]
 
-    Externalized from auth.py so coder wiring lives in this plugin. The dict is
-    module-level mutable (verified Step 0.5), so .update at register time is safe.
+
+def _resolve_codex_exec_credentials() -> dict:
+    """Resolve codex-exec external-process credentials (plugin-owned).
+
+    Replicates the data-driven resolution stock auth.py uses for copilot-acp,
+    but for codex-exec: command from HERMES_CODER_COMMAND (else ``codex``), args
+    from HERMES_CODER_ARGS (else the default exec args), base_url from
+    CODEX_EXEC_BASE_URL (else codex-exec://local). codex-exec has no remote
+    transport, so a missing CLI is always fatal.
     """
-    from hermes_cli.auth import _EXTERNAL_PROCESS_DEFAULTS
+    import os
+    import shlex
+    import shutil
 
-    _EXTERNAL_PROCESS_DEFAULTS["codex-exec"] = {
-        "command_env_vars": ("HERMES_CODER_COMMAND",),
-        "default_command": "codex",
-        "args_env_var": "HERMES_CODER_ARGS",
-        "default_args": [
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "--sandbox",
-            "workspace-write",
-        ],
-        "missing_cli_hint": (
-            "Install OpenAI Codex CLI or set HERMES_CODER_COMMAND."
-        ),
-        "missing_cli_code": "missing_codex_cli",
-        "remote_base_url_prefix": None,
+    from hermes_cli.auth import AuthError, PROVIDER_REGISTRY
+
+    pconfig = PROVIDER_REGISTRY.get("codex-exec")
+    base_url = ""
+    if pconfig is not None and pconfig.base_url_env_var:
+        base_url = os.getenv(pconfig.base_url_env_var, "").strip()
+    if not base_url:
+        base_url = pconfig.inference_base_url if pconfig is not None else _CODEX_EXEC_BASE_URL
+
+    command = os.getenv("HERMES_CODER_COMMAND", "").strip() or "codex"
+    raw_args = os.getenv("HERMES_CODER_ARGS", "").strip()
+    args = shlex.split(raw_args) if raw_args else list(_CODEX_EXEC_DEFAULT_ARGS)
+
+    resolved_command = shutil.which(command) if command else None
+    if not resolved_command:
+        raise AuthError(
+            f"Could not find the CLI command '{command}'. "
+            "Install OpenAI Codex CLI or set HERMES_CODER_COMMAND.",
+            provider="codex-exec",
+            code="missing_codex_cli",
+        )
+
+    return {
+        "provider": "codex-exec",
+        "api_key": "codex-exec",
+        "base_url": base_url.rstrip("/"),
+        "command": resolved_command or command,
+        "args": args,
+        "source": "process",
     }
+
+
+def _install_codex_exec_auth() -> None:
+    """Register codex-exec in hermes_cli.auth without editing auth.py.
+
+    Stock auth.py knows nothing about codex-exec and its
+    resolve_external_process_provider_credentials is hardcoded for copilot-acp.
+    We (1) add a codex-exec ProviderConfig to PROVIDER_REGISTRY so config
+    lookups behave like upstream, and (2) wrap the resolver so codex-exec is
+    resolved by this plugin while everything else falls through to stock.
+    """
+    import hermes_cli.auth as auth
+
+    if "codex-exec" not in auth.PROVIDER_REGISTRY:
+        auth.PROVIDER_REGISTRY["codex-exec"] = auth.ProviderConfig(
+            id="codex-exec",
+            name="OpenAI Codex CLI",
+            auth_type="external_process",
+            inference_base_url=_CODEX_EXEC_BASE_URL,
+            base_url_env_var="CODEX_EXEC_BASE_URL",
+        )
+
+    if getattr(auth, "_subagent_coder_resolver_wrapped", False):
+        return
+
+    _orig_resolve = auth.resolve_external_process_provider_credentials
+
+    def _wrapped_resolve(provider_id: str):
+        if provider_id == "codex-exec":
+            return _resolve_codex_exec_credentials()
+        return _orig_resolve(provider_id)
+
+    auth.resolve_external_process_provider_credentials = _wrapped_resolve
+    auth._subagent_coder_resolver_wrapped = True
+    logger.info("subagent_coder: codex-exec registered + resolve_external_process wrapped")
