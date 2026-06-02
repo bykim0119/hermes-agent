@@ -46,6 +46,7 @@ def register(ctx) -> None:
     _install_codex_exec_client_factory_wrap()
     _install_coder_spawn_callback_slot()
     _install_gateway_coder_spawn_wraps()
+    _install_coder_toolset_membership()
     # Task 6~7: auth resolver / Discord overlay.
     logger.info(
         "subagent_coder: register(ctx) complete "
@@ -371,6 +372,41 @@ def _install_gateway_coder_spawn_wraps() -> None:
     GatewayRunner._run_agent = _wrapped_run_agent
     GatewayRunner._subagent_coder_run_agent_wrapped = True
     logger.info("subagent_coder: GatewayRunner._run_agent wrapped for coder_spawn_callback")
+
+
+def _install_coder_toolset_membership() -> None:
+    """Make delegate_task_background a member of every toolset that offers
+    delegate_task — without editing toolsets.py.
+
+    Stock toolsets.py listed delegate_task_background in ``_HERMES_CORE_TOOLS``
+    and the ``delegation`` toolset. We replicate that at register time:
+
+      * ``_HERMES_CORE_TOOLS`` is mutated in place, so all toolsets that hold it
+        by reference (hermes-cli, hermes-cron, hermes-telegram, ...) pick it up
+        live via resolve_toolset.
+      * A few toolsets (hermes-discord, hermes-feishu, hermes-yuanbao) and the
+        ``delegation`` toolset store SEPARATE lists (built with
+        ``_HERMES_CORE_TOOLS + [...]`` at import, or their own literal). Those
+        copies don't see the in-place mutation, so we scan TOOLSETS and add
+        delegate_task_background to any list that offers delegate_task but not
+        the background variant. resolve_toolset set()-ifies tools, so ordering
+        is irrelevant; the membership is what matters.
+    """
+    import toolsets
+
+    core = toolsets._HERMES_CORE_TOOLS
+    if "delegate_task_background" not in core:
+        idx = (core.index("delegate_task") + 1) if "delegate_task" in core else len(core)
+        core.insert(idx, "delegate_task_background")
+
+    for ts in toolsets.TOOLSETS.values():
+        tools = ts.get("tools")
+        if tools is core or not isinstance(tools, list):
+            continue  # by-reference (already mutated) or non-list
+        if "delegate_task" in tools and "delegate_task_background" not in tools:
+            tools.append("delegate_task_background")
+
+    logger.info("subagent_coder: delegate_task_background added to delegation toolsets")
 
 
 def _register_external_process_defaults() -> None:
