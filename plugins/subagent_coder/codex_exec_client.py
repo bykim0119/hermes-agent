@@ -214,7 +214,7 @@ class CodexExecFacade:
         # a tools → agent → tools cycle at module load.
         if subagent_id:
             try:
-                from plugins.subagent_coder.delegate_background import _attach_coder_client
+                from .delegate_background import _attach_coder_client
                 _attach_coder_client(subagent_id, self._client)
             except Exception:
                 logger.debug("CodexExecFacade attach failed", exc_info=True)

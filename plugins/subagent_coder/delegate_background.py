@@ -143,12 +143,12 @@ def _build_coder_progress_sink(coder_run_id: str):
     def _sink(event) -> None:
         try:
             if event.event == "thread.started":
-                from plugins.subagent_coder.coder_sessions import get_global_sessions
+                from .coder_sessions import get_global_sessions
                 tid = (event.data or {}).get("thread_id")
                 sessions = get_global_sessions()
                 if tid and sessions is not None:
                     sessions.set_codex_session_id(coder_run_id, tid)
-            from plugins.subagent_coder import coder_event_bus
+            from . import coder_event_bus
             payload = {"event": event.event, "data": event.data}
             coder_event_bus.dispatch(coder_run_id, payload)
         except Exception:
@@ -177,7 +177,7 @@ def _spawn_detached_coder(
     def _runner() -> None:
         # Imported lazily — codex_exec_client lives in this package and the
         # stock delegate_task import would create a cycle if pulled in at top.
-        from plugins.subagent_coder.codex_exec_client import register_coder_sink, unregister_coder_sink
+        from .codex_exec_client import register_coder_sink, unregister_coder_sink
         from tools.delegate_tool import delegate_task
 
         register_coder_sink(coder_run_id, sink)
@@ -235,7 +235,7 @@ def _resolve_codex_command_and_args() -> tuple[str, list[str]]:
     override those, otherwise ``delegation.coder.args`` is meaningless
     on hosts where the auth resolver succeeds with its own args.
     """
-    from plugins.subagent_coder.coder_config import coder_setting
+    from .coder_config import coder_setting
 
     explicit_command = coder_setting(
         "command",
@@ -307,7 +307,7 @@ def _spawn_codex_coder(
     which crashes bwrap loopback on this VM.
     """
     import asyncio as _asyncio
-    from plugins.subagent_coder.codex_exec_client import CodexExecClient
+    from .codex_exec_client import CodexExecClient
 
     sink = _build_coder_progress_sink(coder_run_id)
     command, base_args = _resolve_codex_command_and_args()
@@ -408,7 +408,7 @@ def delegate_task_background(
 
     # Surface missing/expired codex auth as a structured error instead of
     # letting codex fail mid-NDJSON-stream with an opaque returncode.
-    from plugins.subagent_coder.coder_config import check_codex_auth
+    from .coder_config import check_codex_auth
     auth_err = check_codex_auth()
     if auth_err:
         return {

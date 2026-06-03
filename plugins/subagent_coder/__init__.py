@@ -85,7 +85,7 @@ def _install_delegate_dispatch_wrap() -> None:
 
     def _wrapped_invoke_tool(self, function_name, function_args, *args, **kwargs):
         if function_name == "delegate_task_background":
-            from plugins.subagent_coder.delegate_background import delegate_task_background
+            from .delegate_background import delegate_task_background
             return json.dumps(
                 delegate_task_background(
                     parent_agent=self,
@@ -126,7 +126,7 @@ def _install_coder_child_wraps() -> None:
     ContextVar propagates (no ThreadPoolExecutor boundary).
     """
     import tools.delegate_tool as dt
-    from plugins.subagent_coder.delegate_background import _coder_child_ctx
+    from .delegate_background import _coder_child_ctx
 
     if getattr(dt, "_subagent_coder_child_wrapped", False):
         return
@@ -172,7 +172,7 @@ def _install_sequential_dispatch_wrap() -> None:
     what makes coder delegation work off the stock run_agent.py.
     """
     from run_agent import AIAgent
-    from plugins.subagent_coder.delegate_background import _dispatch_parent_agent
+    from .delegate_background import _dispatch_parent_agent
 
     if getattr(AIAgent, "_subagent_coder_sequential_wrapped", False):
         return
@@ -212,7 +212,7 @@ def _install_codex_exec_client_factory_wrap() -> None:
         if self.provider == "codex-exec" or str(
             client_kwargs.get("base_url", "")
         ).startswith("codex-exec://"):
-            from plugins.subagent_coder.codex_exec_client import CodexExecFacade
+            from .codex_exec_client import CodexExecFacade
             try:
                 from hermes_cli.auth import resolve_external_process_provider_credentials
                 _creds = resolve_external_process_provider_credentials("codex-exec")
@@ -599,7 +599,7 @@ def _resolve_codex_exec_aux_client(
         )
         return None, None
 
-    from plugins.subagent_coder.codex_exec_client import CodexExecFacade
+    from .codex_exec_client import CodexExecFacade
 
     client = CodexExecFacade(
         api_key=api_key,
