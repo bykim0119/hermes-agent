@@ -14,7 +14,13 @@ import logging
 from contextvars import ContextVar
 from typing import Callable, Optional
 
-from . import codex_provider
+# Guarded so the module is importable even when loaded *bare* (no parent package)
+# — e.g. when pytest scans the flat repo root in the standalone plugin repo,
+# whose directory name may not be a valid Python identifier. hermes (and the test
+# conftest) always load this with ``__package__`` set, so the real wiring imports
+# normally; the bare scan just gets a harmless, unused module object.
+if __package__:
+    from . import codex_provider
 
 logger = logging.getLogger(__name__)
 
