@@ -51,11 +51,6 @@ from gateway.config import Platform, PlatformConfig
 import re
 
 from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
-from plugins.subagent_coder.coder_sessions import CoderSessionManager
-from plugins.subagent_coder.coder_progress_formatter import (
-    DebouncedFlusher,
-    format_event as _format_coder_event,
-)
 from utils import atomic_json_write
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -558,25 +553,6 @@ class DiscordAdapter(BasePlatformAdapter):
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
         self._threads = ThreadParticipationTracker("discord")
-        # Coder sub-agent infrastructure (codex-exec via delegate_task_background).
-        # Priority: env > delegation.coder.<key> in config.yaml > default.
-        from plugins.subagent_coder.coder_config import coder_setting
-        _coder_idle = coder_setting(
-            "idle_timeout_seconds",
-            env_var="HERMES_CODER_IDLE_TIMEOUT_S",
-            default=7200,
-            cast=int,
-        )
-        _coder_max = coder_setting(
-            "max_concurrent",
-            env_var="HERMES_CODER_MAX_CONCURRENT",
-            default=3,
-            cast=int,
-        )
-        self._coder_sessions = CoderSessionManager(
-            idle_timeout_seconds=_coder_idle, max_concurrent=_coder_max
-        )
-        self._coder_flusher: Optional[DebouncedFlusher] = None  # set in on_ready
         # Persistent typing indicator loops per channel (DMs don't reliably
         # show the standard typing gateway event for bots)
         self._typing_tasks: Dict[str, asyncio.Task] = {}
@@ -711,37 +687,6 @@ class DiscordAdapter(BasePlatformAdapter):
                     adapter_self._run_post_connect_initialization()
                 )
 
-                # Start the coder progress debouncer (publishes to threads).
-                if adapter_self._coder_flusher is None:
-                    from plugins.subagent_coder.coder_config import coder_setting
-                    adapter_self._coder_flusher = DebouncedFlusher(
-                        interval_ms=coder_setting(
-                            "progress_debounce_ms",
-                            env_var="HERMES_CODER_DEBOUNCE_MS",
-                            default=250,
-                            cast=int,
-                        ),
-                        publish=adapter_self._publish_to_thread,
-                    )
-                    adapter_self._coder_flusher.start()
-
-                # Publish this adapter's coder hook to the gateway-level bus so
-                # the coder sink (which runs in a background thread outside any
-                # parent agent turn) can route NDJSON events to our threads.
-                # set_global_sessions exposes our CoderSessionManager so the
-                # sink can capture codex session UUIDs from thread.started.
-                try:
-                    from plugins.subagent_coder import coder_event_bus
-                    from plugins.subagent_coder.coder_sessions import set_global_sessions
-
-                    set_global_sessions(adapter_self._coder_sessions)
-                    coder_event_bus.register_handler(
-                        adapter_self.on_coder_event,
-                        asyncio.get_running_loop(),
-                    )
-                except Exception as _e:
-                    logger.debug("[%s] coder_event_bus register failed: %s", adapter_self.name, _e)
-
             @self._client.event
             async def on_message(message: DiscordMessage):
                 # Block until _resolve_allowed_usernames has swapped
@@ -845,26 +790,6 @@ class DiscordAdapter(BasePlatformAdapter):
                         if "*" not in _free_channels and not (_channel_ids & _free_channels):
                             return
 
-                # Coder thread follow-up: if the message lands in a thread that
-                # is bound to an active coder session, route it to that coder
-                # instead of the main Hermes brain. This is unconditional once
-                # the thread is bound — the user opted into a coder workspace
-                # by being there.
-                if isinstance(message.channel, discord.Thread):
-                    _cid = adapter_self._coder_sessions.get_coder_by_thread(
-                        str(message.channel.id)
-                    )
-                    if _cid:
-                        from plugins.subagent_coder.delegate_background import is_cancel_command
-                        if is_cancel_command(message.content):
-                            await adapter_self._cancel_coder_run(_cid, message.channel)
-                            return
-                        adapter_self._coder_sessions.touch(_cid)
-                        await adapter_self._handle_coder_followup(
-                            _cid, message.content, message.channel
-                        )
-                        return
-
                 await self._handle_message(message)
 
             @self._client.event
@@ -948,21 +873,6 @@ class DiscordAdapter(BasePlatformAdapter):
         self._client = None
         self._ready_event.clear()
         self._post_connect_task = None
-
-        # Detach this adapter from the coder event bus + global sessions
-        # pointer so a stale handler can't be invoked after disconnect.
-        try:
-            from plugins.subagent_coder import coder_event_bus
-            from plugins.subagent_coder.coder_sessions import (
-                get_global_sessions,
-                set_global_sessions,
-            )
-
-            coder_event_bus.unregister_handler(self.on_coder_event)
-            if get_global_sessions() is self._coder_sessions:
-                set_global_sessions(None)
-        except Exception:
-            pass
 
         self._release_platform_lock()
 
@@ -3119,11 +3029,6 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_background(interaction: discord.Interaction, prompt: str):
             await self._run_simple_slash(interaction, f"/background {prompt}", "Background task started~")
 
-        @tree.command(name="code", description="Spawn a coder sub-agent for this task")
-        @discord.app_commands.describe(task="The coding task to delegate to the coder")
-        async def slash_code(interaction: discord.Interaction, task: str):
-            await self._handle_code_slash(interaction, task)
-
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -3746,318 +3651,6 @@ class DiscordAdapter(BasePlatformAdapter):
                         f"Direct error: {direct_error}. Fallback error: {fallback_error}"
                     )
                 }
-
-    # ------------------------------------------------------------------
-    # Coder sub-agent helpers (delegate_task_background)
-    # ------------------------------------------------------------------
-
-    def _make_thread_name(self, goal: str) -> str:
-        """Sanitize a coder goal into a Discord thread name (cap 60 chars)."""
-        name = " ".join((goal or "coder").split())
-        name = name.replace("`", "").replace("\n", " ").strip()
-        return name[:60] if len(name) > 60 else (name or "coder")
-
-    async def _publish_to_thread(self, thread_id: str, body: str) -> None:
-        """Publish a (possibly multi-line) message to a Discord thread by id."""
-        if not body or self._client is None:
-            return
-        try:
-            channel = self._client.get_channel(int(thread_id))
-            if channel is None:
-                channel = await self._client.fetch_channel(int(thread_id))
-            await channel.send(content=body[:1900])
-        except Exception as exc:
-            logger.warning(
-                "[%s] Failed to publish to coder thread %s: %s",
-                self.name,
-                thread_id,
-                exc,
-            )
-
-    async def create_coder_thread(
-        self,
-        coder_run_id: str,
-        goal: str,
-        chat_id: str,
-        parent_thread_id: Optional[str] = None,
-    ) -> None:
-        """Open a Discord thread bound to a coder_run_id.
-
-        Called from gateway/run.py via ``coder_spawn_callback`` when the LLM
-        invokes ``delegate_task_background``. Sends an anchor message, opens a
-        thread off it, and registers the binding in ``_coder_sessions`` so
-        Phase-2 progress routing (subagent_progress events) and follow-up
-        replies in the thread can resolve back to the right coder run.
-
-        If the user mentioned Hermes inside an existing thread, the new coder
-        thread is created off the *parent* channel — Discord doesn't allow
-        nested threads.
-        """
-        if self._client is None:
-            return
-        try:
-            target_id = chat_id
-            channel = self._client.get_channel(int(target_id))
-            if channel is None:
-                channel = await self._client.fetch_channel(int(target_id))
-            if isinstance(channel, discord.Thread):
-                channel = channel.parent or channel
-                if channel is None:
-                    logger.warning(
-                        "[%s] Cannot create coder thread: parent channel missing for %s",
-                        self.name, target_id,
-                    )
-                    return
-            anchor = await channel.send(f"▶ 코더에게 위임 — `{coder_run_id}`")
-            thread_name = self._make_thread_name(goal)
-            thread = await anchor.create_thread(
-                name=thread_name,
-                auto_archive_duration=1440,
-            )
-            try:
-                self._coder_sessions.bind(
-                    coder_run_id=coder_run_id,
-                    thread_id=str(thread.id),
-                    parent_channel_id=str(channel.id),
-                )
-            except ValueError as exc:
-                # max_concurrent guard tripped — let the user know in the
-                # anchor channel and abandon the thread (it will auto-archive).
-                await channel.send(f"⚠️ {exc}")
-                return
-            try:
-                self._threads.mark_participated(str(thread.id))
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.exception(
-                "[%s] Failed to create coder thread for %s: %s",
-                self.name, coder_run_id, exc,
-            )
-
-    async def on_coder_event(self, subagent_id: str, event: dict) -> None:
-        """Route a coder NDJSON event to the bound Discord thread.
-
-        Invoked via ``plugins.subagent_coder.coder_event_bus`` from the coder sink (which
-        lives in a background daemon thread spawned by delegate_task_background
-        or by ``_handle_coder_followup``). Lookup is cheap and tolerant —
-        unknown coder_run_ids drop silently because a thread bind may not yet
-        have committed when the first events stream in (or the coder finished
-        before the bind), and either case is recoverable on the next event.
-        """
-        if not subagent_id or not event:
-            return
-        thread_id = self._coder_sessions.get_thread(subagent_id)
-        if not thread_id:
-            return
-        text = _format_coder_event(event)
-        if not text:
-            return
-        if self._coder_flusher is None:
-            await self._publish_to_thread(thread_id, text)
-            return
-        await self._coder_flusher.add(thread_id, text)
-        try:
-            self._coder_sessions.touch(subagent_id)
-        except Exception:
-            pass
-
-    async def _handle_code_slash(
-        self,
-        interaction: 'discord.Interaction',
-        task: str,
-    ) -> None:
-        """Handle ``/code <task>`` — spawn a fresh coder thread without going
-        through the main Hermes turn.
-
-        This is the deterministic shortcut for coding delegation: the LLM
-        sometimes picks ``delegate_task`` (in-turn) instead of
-        ``delegate_task_background`` even with the AGENTS.md guide, so this
-        slash bypasses LLM tool selection entirely. End result is identical
-        to a successful natural-language delegation — same thread anchor,
-        same coder bus routing, same follow-up support.
-
-        Mirrors the follow-up path's "parent_agent-free spawn" pattern: we
-        call ``_spawn_codex_coder`` directly (no resume) instead of going
-        through delegate_task_background → AIAgent → CodexExecFacade.
-        """
-        if not await self._check_slash_authorization(interaction, "/code"):
-            return
-        if not task or not task.strip():
-            await interaction.response.send_message(
-                "Usage: `/code <task>` — describe the coding task to delegate.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.defer(ephemeral=True)
-
-        # Pre-check codex auth so the user sees a specific message instead
-        # of an opaque process failure inside the thread.
-        try:
-            from plugins.subagent_coder.coder_config import check_codex_auth
-            auth_err = check_codex_auth()
-        except Exception:
-            auth_err = None  # never block on the pre-check itself
-        if auth_err:
-            await interaction.followup.send(f"❌ {auth_err}", ephemeral=True)
-            return
-
-        import uuid as _uuid
-
-        coder_run_id = f"coder-{_uuid.uuid4().hex[:8]}"
-        parent_task_id = f"slash:/code:{interaction.user.id}"
-
-        try:
-            from plugins.subagent_coder.delegate_background import _register_coder_run, _spawn_codex_coder
-        except Exception as exc:
-            logger.exception("[%s] /code import failed: %s", self.name, exc)
-            await interaction.followup.send(f"❌ /code import 실패: {exc}", ephemeral=True)
-            return
-
-        _register_coder_run(coder_run_id, parent_task_id, task)
-
-        # Create thread (anchor message + bind to coder_sessions). If we're
-        # inside an existing thread, anchor in the parent channel — Discord
-        # disallows nested threads.
-        try:
-            channel = interaction.channel
-            chat_id = str(channel.id)
-            parent_thread_id = None
-            if isinstance(channel, discord.Thread):
-                parent_thread_id = chat_id
-                parent_channel = channel.parent
-                if parent_channel is not None:
-                    chat_id = str(parent_channel.id)
-            await self.create_coder_thread(
-                coder_run_id=coder_run_id,
-                goal=task,
-                chat_id=chat_id,
-                parent_thread_id=parent_thread_id,
-            )
-        except Exception as exc:
-            logger.exception("[%s] /code thread creation failed: %s", self.name, exc)
-            await interaction.followup.send(
-                f"❌ 스레드 생성 실패: {exc}", ephemeral=True
-            )
-            return
-
-        # Spawn the coder (fresh — no resume_session_id). thread.started will
-        # populate codex_session_id so follow-up messages in the thread work.
-        try:
-            _spawn_codex_coder(coder_run_id=coder_run_id, text=task)
-        except Exception as exc:
-            logger.exception("[%s] /code spawn failed: %s", self.name, exc)
-            await interaction.followup.send(
-                f"❌ 코더 시작 실패: {exc}", ephemeral=True
-            )
-            return
-
-        # Clean up the ephemeral defer; the public anchor + thread are now
-        # carrying the conversation.
-        try:
-            await interaction.delete_original_response()
-        except Exception:
-            pass
-
-    async def _cancel_coder_run(
-        self,
-        coder_run_id: str,
-        thread: Any,
-    ) -> None:
-        """Cancel an active coder run from inside its Discord thread.
-
-        Triggered when ``is_cancel_command`` matches a thread message. We
-        SIGTERM the codex process group via ``cancel_coder_run`` and post
-        a terminal message. The session binding is removed so any race
-        with a late ``thread.completed`` event doesn't re-touch the slot.
-        We do NOT delete or archive the thread — the user can scroll the
-        captured progress, which is usually why they cancelled.
-        """
-        try:
-            from plugins.subagent_coder.delegate_background import cancel_coder_run
-        except Exception as exc:
-            logger.exception(
-                "[%s] cancel import failed for %s: %s",
-                self.name, coder_run_id, exc,
-            )
-            try:
-                await thread.send(f"❌ 취소 import 실패: {exc}")
-            except Exception:
-                pass
-            return
-
-        ok = bool(cancel_coder_run(coder_run_id))
-        try:
-            if ok:
-                await thread.send("❌ 취소됨")
-            else:
-                await thread.send(
-                    f"⚠️ 취소 시도 — 코더(`{coder_run_id}`)가 이미 종료/미등록"
-                )
-        except Exception:
-            logger.debug("cancel announce failed", exc_info=True)
-        try:
-            self._coder_sessions.unbind(coder_run_id)
-        except Exception:
-            logger.debug("coder_sessions.unbind failed", exc_info=True)
-
-    async def _handle_coder_followup(
-        self,
-        coder_run_id: str,
-        text: str,
-        thread: Any,
-    ) -> None:
-        """Forward a message in a coder-bound thread to ``codex exec resume``.
-
-        Uses the codex session UUID captured from the first spawn's
-        ``thread.started`` event to re-enter the same conversation context
-        (codex 0.121.0+). If the UUID is missing — older codex, eviction race,
-        or sandbox-blocked startup — we tell the user and abandon: a cold
-        spawn would silently lose the prior workspace state, which is worse
-        than an explicit error.
-        """
-        if not text or not text.strip():
-            return
-        try:
-            from plugins.subagent_coder.coder_config import check_codex_auth
-            auth_err = check_codex_auth()
-        except Exception:
-            auth_err = None
-        if auth_err:
-            try:
-                await thread.send(f"❌ {auth_err}")
-            except Exception:
-                pass
-            return
-        codex_session_id = self._coder_sessions.get_codex_session_id(coder_run_id)
-        if not codex_session_id:
-            try:
-                await thread.send(
-                    "⚠️ 코더 세션 UUID 미기록 — `codex exec resume` 불가. "
-                    "새 위임으로 시작해주세요."
-                )
-            except Exception:
-                pass
-            return
-
-        try:
-            from plugins.subagent_coder.delegate_background import _spawn_followup_coder
-
-            _spawn_followup_coder(
-                coder_run_id=coder_run_id,
-                codex_session_id=codex_session_id,
-                text=text,
-            )
-        except Exception as exc:
-            logger.exception(
-                "[%s] Failed to spawn coder follow-up for %s: %s",
-                self.name, coder_run_id, exc,
-            )
-            try:
-                await thread.send(f"❌ follow-up spawn 실패: {exc}")
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # Auto-thread helpers

@@ -48,11 +48,12 @@ def register(ctx) -> None:
     _install_coder_spawn_callback_slot()
     _install_gateway_coder_spawn_wraps()
     _install_coder_toolset_membership()
-    # Task 6~7: auth resolver / Discord overlay.
+    _install_discord_coder_overlay()
     logger.info(
         "subagent_coder: register(ctx) complete "
         "(provider + defaults + delegate_background + dispatch/sequential/child/"
-        "client/run_conversation wraps + spawn-callback slot + gateway spawn hook)"
+        "client/run_conversation wraps + spawn-callback slot + gateway spawn hook "
+        "+ discord overlay)"
     )
 
 
@@ -459,6 +460,35 @@ def _resolve_codex_exec_credentials() -> dict:
         "args": args,
         "source": "process",
     }
+
+
+def _install_discord_coder_overlay() -> None:
+    """Attach the coder overlay onto DiscordAdapter — without editing discord.py.
+
+    The overlay setattrs the coder helper methods (create_coder_thread,
+    on_coder_event, /code handler, ...) and wraps a few stock methods
+    (__init__, _run_post_connect_initialization, disconnect, _handle_message,
+    _register_slash_commands) to restore every coder behavior that used to live
+    inline in ``gateway/platforms/discord.py``.
+
+    DiscordAdapter is created only after discover_plugins() runs register(ctx)
+    (gateway/run.py: discover < _create_adapter), so the class wraps land before
+    any adapter exists. gateway.platforms.discord is gateway-only and heavy and
+    pulls in the discord.py library, so we guard on it already being imported
+    before touching discord_overlay (which imports discord at module top) — this
+    keeps the install a no-op in CLI mode where discord.py may be absent.
+    """
+    import sys
+
+    if "gateway.platforms.discord" not in sys.modules:
+        logger.debug(
+            "subagent_coder: gateway.platforms.discord not loaded — skipping Discord overlay (CLI mode)"
+        )
+        return
+
+    from .discord_overlay import install_discord_coder_overlay
+
+    install_discord_coder_overlay()
 
 
 def _install_codex_exec_auth() -> None:
